@@ -1,0 +1,14 @@
+{
+  "buildCommand": "npm run build",
+  "startCommand": "npm run start",
+  "nix": {
+    "channel": "stable-23_11",
+    "packages": [
+      "nodejs_20",
+      "postgresql_15"
+    ]
+  },
+  "env": {
+    "DATABASE_URL": "$DATABASE_URL"
+  }
+}

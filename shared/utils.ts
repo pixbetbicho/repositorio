@@ -1,0 +1,1 @@
+// Funções relacionadas ao CPF foram removidas

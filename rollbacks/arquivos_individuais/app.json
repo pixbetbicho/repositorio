@@ -1,0 +1,41 @@
+{
+  "name": "jogo-do-bicho-app",
+  "services": [
+    {
+      "name": "web",
+      "environment_slug": "node-js",
+      "build_command": "npm run build",
+      "run_command": "npm run start",
+      "envs": [
+        {
+          "key": "NODE_ENV",
+          "value": "production"
+        },
+        {
+          "key": "SESSION_SECRET",
+          "value": "c48619fe750a4fc48ae5f30a9027cb25cd9c12345678909876acd3210"
+        },
+        {
+          "key": "PORT",
+          "value": "8080"
+        },
+        {
+          "key": "NODE_TLS_REJECT_UNAUTHORIZED",
+          "value": "0"
+        }
+      ],
+      "health_check": {
+        "http_path": "/api/health"
+      },
+      "instance_count": 1,
+      "instance_size_slug": "basic-xxs"
+    }
+  ],
+  "databases": [
+    {
+      "engine": "pg",
+      "name": "db",
+      "production": true
+    }
+  ]
+}

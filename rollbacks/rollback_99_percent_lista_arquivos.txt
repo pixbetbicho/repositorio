@@ -1,0 +1,35 @@
+## Arquivos incluídos no rollback_99_percent
+
+### Diretórios principais:
+- server/
+- client/
+- shared/
+
+### Arquivos de configuração:
+- app.json
+- .env
+- package.json
+
+### Arquivos críticos (prioritários para recuperação):
+- server/db.ts (Conexão com banco de dados)
+- server/storage.ts (Interface de acesso ao banco)
+- server/auth.ts (Sistema de autenticação)
+- server/routes.ts (Rotas da API)
+- shared/schema.ts (Esquema do banco de dados)
+- client/src/lib/queryClient.ts (Cliente para requisições API)
+- app.json (Configuração para deploy no DigitalOcean)
+
+### Interface do usuário:
+- Todos os componentes da interface em client/src/components/
+- Todas as páginas em client/src/pages/
+- Todos os hooks em client/src/hooks/
+- Todo o código de utilidade em client/src/lib/
+
+### Data do backup:
+- 08/05/2025
+
+### Observações importantes:
+- Este rollback representa 99% da funcionalidade do sistema
+- Funciona tanto no ambiente de desenvolvimento (Replit) quanto em produção (DigitalOcean)
+- Inclui todas as otimizações de conexão com banco de dados
+- Todos os sistemas estão operacionais e testados

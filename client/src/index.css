@@ -1,0 +1,283 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Estilo personalizado para garantir que os toasts fiquem visíveis */
+[role="region"][aria-live="polite"] {
+  z-index: 9999 !important;
+  position: fixed !important;
+  bottom: 0 !important;
+  right: 0 !important;
+  display: flex !important;
+  flex-direction: column-reverse !important;
+  max-width: 420px !important;
+  width: 100% !important;
+  padding: 1rem !important;
+}
+
+.ToastRoot {
+  background-color: white !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 0.375rem !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
+  padding: 0.75rem 1rem !important;
+  margin-bottom: 0.5rem !important;
+}
+
+@layer utilities {
+  /* Esconder barra de rolagem mas manter funcionalidade */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  
+  .no-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+  }
+  
+  /* Ocultar qualquer botão fixo no canto inferior esquerdo */
+  .hide-fixed-deposit-button {
+    display: none !important;
+  }
+  
+  /* Seletor ampliado para pegar elementos com as classes que contêm esses termos */
+  *[class*="deposit-button"],
+  *[class*="fixed-deposit"],
+  *[class*="floating-deposit"],
+  *[class*="fixed-button"][class*="deposit"] {
+    display: none !important;
+  }
+}
+
+:root {
+  --background: 210 40% 98%;
+  --foreground: 222 47% 11%;
+  --muted: 210 40% 96.1%;
+  --muted-foreground: 215.4 16.3% 46.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222.2 47.4% 11.2%;
+  --card: 0 0% 100%;
+  --card-foreground: 222.2 47.4% 11.2%;
+  --border: 214.3 31.8% 91.4%;
+  --input: 214.3 31.8% 91.4%;
+  --primary: 246 60% 58%;
+  --primary-dark: 246 70% 50%;
+  --primary-foreground: 210 40% 98%;
+  --secondary: 38 92% 50%;
+  --secondary-foreground: 222.2 47.4% 11.2%;
+  --accent: 25 95% 53%;
+  --accent-foreground: 222.2 47.4% 11.2%;
+  --destructive: 0 100% 50%;
+  --destructive-foreground: 210 40% 98%;
+  --ring: 246 60% 58%;
+  --radius: 0.5rem;
+
+  /* Chart Colors */
+  --chart-1: 246 60% 58%;
+  --chart-2: 38 92% 50%;
+  --chart-3: 220 70% 50%;
+  --chart-4: 340 82% 52%;
+  --chart-5: 25 95% 53%;
+}
+
+.dark {
+  --background: 222.2 84% 4.9%;
+  --foreground: 210 40% 98%;
+  --muted: 217.2 32.6% 17.5%;
+  --muted-foreground: 215 20.2% 65.1%;
+  --popover: 222.2 84% 4.9%;
+  --popover-foreground: 210 40% 98%;
+  --card: 222.2 84% 4.9%;
+  --card-foreground: 210 40% 98%;
+  --border: 217.2 32.6% 17.5%;
+  --input: 217.2 32.6% 17.5%;
+  --primary: 246 60% 58%;
+  --primary-dark: 246 70% 50%;
+  --primary-foreground: 210 40% 98%;
+  --secondary: 38 92% 50%;
+  --secondary-foreground: 210 40% 98%;
+  --accent: 25 95% 53%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 0 85.7% 97.3%;
+  --ring: 246 60% 58%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+  
+  /* Ocultar botões fixos no canto inferior esquerdo */
+  div[class*="fixed"][class*="bottom"][class*="left"],
+  button[class*="fixed"][class*="bottom"][class*="left"],
+  a[class*="fixed"][class*="bottom"][class*="left"] {
+    display: none !important;
+  }
+}
+
+/* Animations for the landing page */
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-20px); }
+  100% { transform: translateY(0px); }
+}
+
+@keyframes shine {
+  0% { background-position: -100px; }
+  40%, 100% { background-position: 340px; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Animal card animations and styles */
+.animal-card {
+  @apply transition-all duration-300 ease-in-out cursor-pointer;
+}
+
+.animal-card:hover {
+  @apply transform -translate-y-1 shadow-lg border-primary;
+}
+
+.tab-active {
+  @apply border-b-2 border-primary text-primary;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--primary) / 0.5);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--primary));
+}
+
+/* Custom utility classes */
+.bg-primary-dark {
+  background-color: hsl(var(--primary-dark));
+}
+
+.text-primary-dark {
+  color: hsl(var(--primary-dark));
+}
+
+.hover\:bg-primary-dark:hover {
+  background-color: hsl(var(--primary-dark));
+}
+
+.hover\:text-primary-dark:hover {
+  color: hsl(var(--primary-dark));
+}
+
+/* Seletores para ocultar o botão de depósito flutuante */
+div[style*="position:fixed"][style*="bottom"][style*="left"],
+button[style*="position:fixed"][style*="bottom"][style*="left"],
+a[style*="position:fixed"][style*="bottom"][style*="left"],
+.fixed.bottom-0.left-0,
+.fixed.left-0.bottom-0 {
+  display: none !important;
+}
+
+/* Shine effect */
+.shine {
+  position: relative;
+  overflow: hidden;
+}
+
+.shine::after {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: linear-gradient(
+    to right, 
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.3) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: rotate(30deg);
+  animation: shine 3s infinite;
+}
+
+/* Highlight */
+.highlight {
+  position: relative;
+}
+
+.highlight::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2px;
+  height: 8px;
+  background-color: hsl(var(--secondary) / 0.4);
+  z-index: -1;
+  transform: skew(-12deg);
+}
+
+/* Pulsing animation for badges */
+.pulse-badge {
+  animation: pulse 2s infinite;
+}
+
+/* Corrige elemento flutuante no canto inferior */
+[data-intercom="frame"],
+[id^="intercom"],
+[class^="intercom"],
+[id^="crisp"],
+[class^="crisp"],
+[id^="tawkto"],
+div[style*="z-index: 999999"],
+div[style*="z-index:999999"],
+div[style*="z-index: 99999"],
+div[style*="z-index:99999"],
+div[style*="z-index: 9999"],
+div[style*="z-index:9999"],
+[class*="chat-button"],
+[id*="chat-button"],
+[class*="support-button"],
+[id*="support-button"],
+[class*="deposit-button"],
+[id*="deposit-button"],
+[class*="withdraw-button"],
+[id*="withdraw-button"],
+[class*="sacar-button"],
+[id*="sacar-button"],
+[class*="saque-button"],
+[id*="saque-button"],
+[class*="floating-button"],
+[id*="floating-button"],
+button.fixed,
+div.fixed.bottom-0,
+div[class*="fixed"][class*="button"],
+div[class*="fixed"][class*="depositar"],
+div[class*="fixed"][class*="sacar"],
+div[class*="fixed"][class*="saque"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  max-height: 0 !important;
+  max-width: 0 !important;
+  transform: scale(0) !important;
+}

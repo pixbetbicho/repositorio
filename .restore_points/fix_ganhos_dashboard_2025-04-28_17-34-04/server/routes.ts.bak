@@ -1,0 +1,1196 @@
+import type { Express, Request, Response } from "express";
+import { createServer, type Server } from "http";
+import { storage } from "./storage";
+import { setupAuth, comparePasswords, hashPassword } from "./auth";
+import { z } from "zod";
+import { insertBetSchema, insertDrawSchema, insertUserSchema, insertGameModeSchema } from "@shared/schema";
+import { pool } from "./db";
+
+export async function registerRoutes(app: Express): Promise<Server> {
+  // Set up authentication routes
+  setupAuth(app);
+
+  // Protected route middleware
+  const requireAuth = (req: Request, res: Response, next: Function) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    next();
+  };
+
+  // Admin route middleware
+  const requireAdmin = (req: Request, res: Response, next: Function) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    next();
+  };
+
+  // Get all animals
+  app.get("/api/animals", async (req, res) => {
+    try {
+      const animals = await storage.getAllAnimals();
+      res.json(animals);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching animals" });
+    }
+  });
+
+  // Get upcoming draws
+  app.get("/api/draws/upcoming", async (req, res) => {
+    try {
+      const draws = await storage.getUpcomingDraws();
+      res.json(draws);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching upcoming draws" });
+    }
+  });
+  
+  // Get public system settings (accessible without authentication)
+  app.get("/api/settings", async (req, res) => {
+    try {
+      // Fetch settings but only return public-facing ones
+      const settings = await storage.getSystemSettings();
+      
+      if (settings) {
+        // Apenas retorna as configurações que afetam funcionalidades do cliente
+        const publicSettings = {
+          maxBetAmount: settings.maxBetAmount,
+          maxPayout: settings.maxPayout,
+          mainColor: settings.mainColor,
+          secondaryColor: settings.secondaryColor,
+          accentColor: settings.accentColor,
+          allowUserRegistration: settings.allowUserRegistration,
+          allowDeposits: settings.allowDeposits,
+          allowWithdrawals: settings.allowWithdrawals,
+          maintenanceMode: settings.maintenanceMode
+        };
+        
+        res.json(publicSettings);
+      } else {
+        // Default values para configurações públicas
+        const defaultSettings = {
+          maxBetAmount: 5000,
+          maxPayout: 50000,
+          mainColor: "#4f46e5",
+          secondaryColor: "#6366f1",
+          accentColor: "#f97316",
+          allowUserRegistration: true,
+          allowDeposits: true,
+          allowWithdrawals: true,
+          maintenanceMode: false
+        };
+        
+        res.json(defaultSettings);
+      }
+    } catch (error) {
+      console.error("Error fetching public system settings:", error);
+      res.status(500).json({ message: "Error fetching system settings" });
+    }
+  });
+
+  // Get all draws
+  app.get("/api/draws", requireAuth, async (req, res) => {
+    try {
+      const draws = await storage.getAllDraws();
+      res.json(draws);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching draws" });
+    }
+  });
+
+  // Create new draw (admin only)
+  app.post("/api/draws", requireAdmin, async (req, res) => {
+    try {
+      console.log("Dados recebidos para criação de sorteio:", req.body);
+      
+      // Validar os dados básicos
+      const validatedData = insertDrawSchema.parse(req.body);
+      
+      // Garantir que a data está no formato correto antes de salvar
+      // Se for string, convertemos para Date, se for Date, mantemos como está
+      let formattedData = {
+        ...validatedData,
+        date: typeof validatedData.date === 'string' 
+          ? new Date(validatedData.date) 
+          : validatedData.date
+      };
+      
+      console.log("Dados formatados para criação de sorteio:", formattedData);
+      
+      // Criar o sorteio no banco de dados
+      const draw = await storage.createDraw(formattedData);
+      
+      console.log("Sorteio criado com sucesso:", draw);
+      res.status(201).json(draw);
+    } catch (error) {
+      console.error("Erro ao criar sorteio:", error);
+      
+      if (error instanceof z.ZodError) {
+        console.error("Erros de validação:", JSON.stringify(error.errors, null, 2));
+        return res.status(400).json({ message: "Invalid draw data", errors: error.errors });
+      }
+      
+      res.status(500).json({ 
+        message: "Error creating draw", 
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+  
+  // Update draw (admin only)
+  app.put("/api/draws/:id", requireAdmin, async (req, res) => {
+    try {
+      const drawId = parseInt(req.params.id);
+      console.log("Dados recebidos para atualização de sorteio:", req.body);
+      
+      // Processar os dados da requisição
+      let drawData = req.body;
+      
+      // Garantir que a data está no formato correto antes de salvar
+      if (drawData.date && typeof drawData.date === 'string') {
+        drawData = {
+          ...drawData,
+          date: new Date(drawData.date)
+        };
+      }
+      
+      console.log("Dados formatados para atualização de sorteio:", drawData);
+      
+      // Atualizar sorteio
+      const updatedDraw = await storage.updateDraw(drawId, drawData);
+      
+      if (!updatedDraw) {
+        return res.status(404).json({ message: "Sorteio não encontrado" });
+      }
+      
+      console.log("Sorteio atualizado com sucesso:", updatedDraw);
+      res.json(updatedDraw);
+    } catch (error) {
+      console.error("Error updating draw:", error);
+      res.status(500).json({ 
+        message: "Erro ao atualizar sorteio", 
+        error: String(error) 
+      });
+    }
+  });
+  
+  // Delete draw (admin only)
+  app.delete("/api/draws/:id", requireAdmin, async (req, res) => {
+    try {
+      const drawId = parseInt(req.params.id);
+      
+      // Excluir sorteio
+      await storage.deleteDraw(drawId);
+      
+      res.status(200).json({ message: "Sorteio excluído com sucesso" });
+    } catch (error) {
+      console.error("Error deleting draw:", error);
+      res.status(500).json({ 
+        message: "Erro ao excluir sorteio", 
+        error: String(error) 
+      });
+    }
+  });
+
+  // Update draw result (admin only)
+  app.put("/api/draws/:id/result", requireAdmin, async (req, res) => {
+    try {
+      const drawId = Number(req.params.id);
+      const { 
+        animalId, // 1º prêmio (obrigatório) 
+        animalId2, // 2º prêmio (opcional)
+        animalId3, // 3º prêmio (opcional)
+        animalId4, // 4º prêmio (opcional)
+        animalId5, // 5º prêmio (opcional)
+        resultNumber1, // Número do 1º prêmio (obrigatório para Milhar/Centena/Dezena)
+        resultNumber2, // Número do 2º prêmio (opcional)
+        resultNumber3, // Número do 3º prêmio (opcional)
+        resultNumber4, // Número do 4º prêmio (opcional)
+        resultNumber5  // Número do 5º prêmio (opcional)
+      } = req.body;
+      
+      console.log(`Processing draw result: Draw ID: ${drawId}
+        1º prêmio: Animal ${animalId}, Número ${resultNumber1 || 'não definido'}
+        2º prêmio: Animal ${animalId2 || 'não definido'}, Número ${resultNumber2 || 'não definido'}
+        3º prêmio: Animal ${animalId3 || 'não definido'}, Número ${resultNumber3 || 'não definido'}
+        4º prêmio: Animal ${animalId4 || 'não definido'}, Número ${resultNumber4 || 'não definido'}
+        5º prêmio: Animal ${animalId5 || 'não definido'}, Número ${resultNumber5 || 'não definido'}
+      `);
+      
+      // Validar o animal do 1º prêmio (obrigatório)
+      if (!animalId || typeof animalId !== 'number') {
+        console.error(`Invalid animal ID for 1st prize: ${animalId}`);
+        return res.status(400).json({ message: "ID de animal inválido para o 1º prêmio" });
+      }
+
+      // Validar o número do 1º prêmio (obrigatório)
+      if (!resultNumber1) {
+        console.error(`Missing number for 1st prize`);
+        return res.status(400).json({ message: "Número para o 1º prêmio é obrigatório" });
+      }
+
+      const draw = await storage.getDraw(drawId);
+      if (!draw) {
+        console.error(`Draw not found: ${drawId}`);
+        return res.status(404).json({ message: "Sorteio não encontrado" });
+      }
+
+      // Validar todos os animais informados
+      const animalIds = [animalId];
+      if (animalId2) animalIds.push(animalId2);
+      if (animalId3) animalIds.push(animalId3);
+      if (animalId4) animalIds.push(animalId4);
+      if (animalId5) animalIds.push(animalId5);
+      
+      for (const id of animalIds) {
+        const animal = await storage.getAnimal(id);
+        if (!animal) {
+          console.error(`Animal not found: ${id}`);
+          return res.status(404).json({ message: `Animal com ID ${id} não encontrado` });
+        }
+      }
+
+      // Processar os números para garantir o formato correto (4 dígitos)
+      const formattedNumber1 = resultNumber1.padStart(4, '0');
+      const formattedNumber2 = resultNumber2 ? resultNumber2.padStart(4, '0') : undefined;
+      const formattedNumber3 = resultNumber3 ? resultNumber3.padStart(4, '0') : undefined;
+      const formattedNumber4 = resultNumber4 ? resultNumber4.padStart(4, '0') : undefined;
+      const formattedNumber5 = resultNumber5 ? resultNumber5.padStart(4, '0') : undefined;
+
+      console.log(`Processing draw ${drawId} with multiple prize animals and numbers`);
+      const updatedDraw = await storage.updateDrawResult(
+        drawId, 
+        animalId, 
+        animalId2, 
+        animalId3, 
+        animalId4, 
+        animalId5,
+        formattedNumber1,
+        formattedNumber2,
+        formattedNumber3,
+        formattedNumber4,
+        formattedNumber5
+      );
+      
+      if (!updatedDraw) {
+        console.error(`Failed to update draw result for draw ${drawId}`);
+        return res.status(500).json({ message: "Erro ao atualizar resultado do sorteio" });
+      }
+      
+      console.log(`Draw result processed successfully, invalidating caches`);
+      
+      // Add cache invalidation for various endpoints that should be refreshed after updating a draw
+      // This signals clients to reload user data, bets data, and draws data
+      req.app.emit('draw:result', { 
+        drawId, 
+        animalId,
+        animalId2,
+        animalId3,
+        animalId4,
+        animalId5,
+        resultNumber1: formattedNumber1,
+        resultNumber2: formattedNumber2,
+        resultNumber3: formattedNumber3,
+        resultNumber4: formattedNumber4,
+        resultNumber5: formattedNumber5
+      });
+      
+      // Respond with the updated draw
+      res.json(updatedDraw);
+    } catch (error) {
+      console.error(`Error processing draw result: ${error}`);
+      res.status(500).json({ message: "Erro ao processar resultado do sorteio" });
+    }
+  });
+
+  // Create bet
+  app.post("/api/bets", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      console.log(`Creating bet for user ID: ${userId}`);
+      console.log("Bet request data:", req.body);
+      
+      // Validate the bet data
+      const validatedData = insertBetSchema.parse({
+        ...req.body,
+        userId
+      });
+      
+      console.log("Validated bet data:", validatedData);
+      
+      // Verificar configurações do sistema para limites de apostas
+      const systemSettings = await storage.getSystemSettings();
+      console.log("System settings for bet limits:", {
+        maxBetAmount: systemSettings?.maxBetAmount,
+        maxPayout: systemSettings?.maxPayout
+      });
+      
+      // Verificar limite de aposta máxima
+      if (systemSettings && systemSettings.maxBetAmount && validatedData.amount > systemSettings.maxBetAmount) {
+        console.log(`Bet amount exceeds maximum allowed: ${validatedData.amount} > ${systemSettings.maxBetAmount}`);
+        return res.status(400).json({ 
+          message: `A aposta máxima permitida é de R$ ${systemSettings.maxBetAmount}`,
+          currentAmount: validatedData.amount,
+          maxAllowed: systemSettings.maxBetAmount
+        });
+      }
+      
+      // Verify the user has enough balance
+      const user = await storage.getUser(userId);
+      if (!user) {
+        console.log(`User not found: ${userId}`);
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      console.log(`User balance: ${user.balance}, Bet amount: ${validatedData.amount}`);
+      if (user.balance < validatedData.amount) {
+        console.log(`Insufficient balance: ${user.balance} < ${validatedData.amount}`);
+        return res.status(400).json({ 
+          message: "Saldo insuficiente para realizar esta aposta", 
+          currentBalance: user.balance,
+          requiredAmount: validatedData.amount 
+        });
+      }
+      
+      // Verify the draw exists and is pending
+      const draw = await storage.getDraw(validatedData.drawId);
+      if (!draw) {
+        console.log(`Draw not found: ${validatedData.drawId}`);
+        return res.status(404).json({ message: "Sorteio não encontrado" });
+      }
+      
+      if (draw.status !== "pending") {
+        console.log(`Draw not pending: ${draw.status}`);
+        return res.status(400).json({ message: "Este sorteio não está mais aceitando apostas" });
+      }
+      
+      const now = new Date();
+      if (new Date(draw.date) < now) {
+        console.log(`Draw already started: ${draw.date} < ${now}`);
+        return res.status(400).json({ message: "Este sorteio já começou" });
+      }
+      
+      // Verify animals exist based on bet type
+      console.log(`Validating animals for bet type: ${validatedData.type}`);
+      
+      // Verificando tipos de apostas por grupo (animal)
+      if (["group"].includes(validatedData.type)) {
+        // Grupo (1 animal)
+        console.log("Validando aposta por grupo com body:", req.body);
+        
+        // Verificar todos os possíveis campos onde o número pode estar
+        if (req.body.numbers) {
+          console.log(`Encontrado 'numbers' no corpo: ${req.body.numbers}`);
+          // Converter para betNumbers para processamento
+          if (!validatedData.betNumbers) validatedData.betNumbers = [];
+          validatedData.betNumbers.push(req.body.numbers);
+        }
+        
+        // Verificar se temos animalId ou betNumbers (apostas numéricas interpretadas como animais)
+        if (!validatedData.animalId && (!validatedData.betNumbers || !validatedData.betNumbers.length)) {
+          return res.status(400).json({ message: "Animal ou número é obrigatório para apostas de grupo" });
+        }
+        
+        // Se temos animalId, validar que o animal existe
+        if (validatedData.animalId) {
+          const animal = await storage.getAnimal(validatedData.animalId);
+          if (!animal) {
+            console.log(`Animal not found: ${validatedData.animalId}`);
+            return res.status(404).json({ message: "Animal não encontrado" });
+          }
+          console.log(`Animal found for GROUP bet: ${animal.name} (${animal.group})`);
+        }
+        // Se temos betNumbers, vamos usar esses números para representar o grupo
+        else if (validatedData.betNumbers && validatedData.betNumbers.length > 0) {
+          console.log(`Using numeric input for GROUP bet: ${validatedData.betNumbers.join(', ')}`);
+          // Não precisamos validar mais nada aqui, os números serão processados posteriormente
+        }
+      } 
+      // Verificando tipos que requerem 2 animais
+      else if (["duque_grupo", "passe_ida", "passe_ida_volta"].includes(validatedData.type)) {
+        // Requer 2 animais (principal + secundário)
+        if (!validatedData.animalId || !validatedData.animalId2) {
+          return res.status(400).json({ message: "Dois animais são obrigatórios para este tipo de aposta" });
+        }
+        
+        // Verificar primeiro animal
+        const animal1 = await storage.getAnimal(validatedData.animalId);
+        if (!animal1) {
+          console.log(`First animal not found: ${validatedData.animalId}`);
+          return res.status(404).json({ message: "Primeiro animal não encontrado" });
+        }
+        
+        // Verificar segundo animal
+        const animal2 = await storage.getAnimal(validatedData.animalId2);
+        if (!animal2) {
+          console.log(`Second animal not found: ${validatedData.animalId2}`);
+          return res.status(404).json({ message: "Segundo animal não encontrado" });
+        }
+        
+        console.log(`2 animals found for ${validatedData.type} bet: ${animal1.name} and ${animal2.name}`);
+      }
+      // Verificando tipos que requerem 3 animais
+      else if (["terno_grupo"].includes(validatedData.type)) {
+        // Requer 3 animais
+        if (!validatedData.animalId || !validatedData.animalId2 || !validatedData.animalId3) {
+          return res.status(400).json({ message: "Três animais são obrigatórios para este tipo de aposta" });
+        }
+        
+        // Verificar todos os animais
+        const animalIds = [validatedData.animalId, validatedData.animalId2, validatedData.animalId3];
+        for (const id of animalIds) {
+          const animal = await storage.getAnimal(id);
+          if (!animal) {
+            console.log(`Animal not found: ${id}`);
+            return res.status(404).json({ message: `Animal com ID ${id} não encontrado` });
+          }
+        }
+        
+        console.log(`3 animals validated for terno_grupo bet`);
+      }
+      // Verificando tipos que requerem 4 animais
+      else if (["quadra_duque"].includes(validatedData.type)) {
+        // Requer 4 animais
+        if (!validatedData.animalId || !validatedData.animalId2 || 
+            !validatedData.animalId3 || !validatedData.animalId4) {
+          return res.status(400).json({ message: "Quatro animais são obrigatórios para este tipo de aposta" });
+        }
+        
+        // Verificar todos os animais
+        const animalIds = [
+          validatedData.animalId, 
+          validatedData.animalId2, 
+          validatedData.animalId3,
+          validatedData.animalId4
+        ];
+        
+        for (const id of animalIds) {
+          const animal = await storage.getAnimal(id);
+          if (!animal) {
+            console.log(`Animal not found: ${id}`);
+            return res.status(404).json({ message: `Animal com ID ${id} não encontrado` });
+          }
+        }
+        
+        console.log(`4 animals validated for quadra_duque bet`);
+      }
+      // Verificando tipos que requerem 5 animais
+      else if (["quina_grupo"].includes(validatedData.type)) {
+        // Requer 5 animais
+        if (!validatedData.animalId || !validatedData.animalId2 || 
+            !validatedData.animalId3 || !validatedData.animalId4 || 
+            !validatedData.animalId5) {
+          return res.status(400).json({ message: "Cinco animais são obrigatórios para este tipo de aposta" });
+        }
+        
+        // Verificar todos os animais
+        const animalIds = [
+          validatedData.animalId, 
+          validatedData.animalId2, 
+          validatedData.animalId3,
+          validatedData.animalId4,
+          validatedData.animalId5
+        ];
+        
+        for (const id of animalIds) {
+          const animal = await storage.getAnimal(id);
+          if (!animal) {
+            console.log(`Animal not found: ${id}`);
+            return res.status(404).json({ message: `Animal com ID ${id} não encontrado` });
+          }
+        }
+        
+        console.log(`5 animals validated for quina_grupo bet`);
+      }
+      // Verificando apostas baseadas em números (dezena, centena, milhar)
+      else if (["dozen", "hundred", "thousand"].includes(validatedData.type)) {
+        // Para apostas baseadas em números, verificar se os números existem
+        console.log("Validando aposta numérica com body:", req.body);
+        
+        // Verificar todos os possíveis campos onde o número pode estar
+        if (req.body.betNumber) {
+          console.log(`Encontrado betNumber no corpo da requisição: ${req.body.betNumber}`);
+          if (!validatedData.betNumbers) validatedData.betNumbers = [];
+          validatedData.betNumbers.push(String(req.body.betNumber));
+        }
+        
+        if (req.body.numbers) {
+          console.log(`Encontrado campo numbers no corpo da requisição: ${req.body.numbers}`);
+          if (!validatedData.betNumbers) validatedData.betNumbers = [];
+          validatedData.betNumbers.push(String(req.body.numbers));
+        }
+        
+        // Verificação final de betNumbers
+        if (!validatedData.betNumbers || !validatedData.betNumbers.length) {
+          return res.status(400).json({ message: "Números da aposta são obrigatórios para este tipo de aposta" });
+        }
+        
+        // FORÇAR o ID correto da modalidade baseado no tipo independente do que foi enviado
+        let expectedLength = 0;
+        
+        if (validatedData.type === "dozen") {
+          expectedLength = 2;
+          validatedData.gameModeId = 4; // Força para Dezena
+          console.log("FORÇANDO gameModeId para 4 (Dezena)");
+        }
+        else if (validatedData.type === "hundred") {
+          expectedLength = 3;
+          validatedData.gameModeId = 2; // Força para Centena
+          console.log("FORÇANDO gameModeId para 2 (Centena)");
+        }
+        else if (validatedData.type === "thousand") {
+          expectedLength = 4;
+          validatedData.gameModeId = 1; // Força para Milhar
+          console.log("FORÇANDO gameModeId para 1 (Milhar)");
+        }
+        
+        // Formatação dos números para garantir o comprimento correto para cada tipo de aposta
+        validatedData.betNumbers = validatedData.betNumbers.map(num => {
+          // Garantir que é uma string e remover espaços
+          let cleanNum = String(num).trim();
+          
+          // Remover caracteres não numéricos
+          cleanNum = cleanNum.replace(/\D/g, '');
+          
+          // Preencher com zeros à esquerda se necessário
+          while (cleanNum.length < expectedLength) {
+            cleanNum = '0' + cleanNum;
+          }
+          
+          // Se o número for maior que o esperado, pegar apenas os últimos dígitos
+          if (cleanNum.length > expectedLength) {
+            cleanNum = cleanNum.slice(-expectedLength);
+          }
+          
+          return cleanNum;
+        });
+        
+        console.log(`Números formatados após processamento: ${validatedData.betNumbers.join(', ')}`);
+        
+        // Verificação rigorosa do formato dos números com base no tipo de aposta
+        // Em vez de ajustar automaticamente, exigimos que o formato seja exatamente o esperado
+        
+        // Verificar se cada número têm exatamente o tamanho correto para o tipo de aposta
+        for (const num of validatedData.betNumbers) {
+          // Definições específicas de cada tipo
+          const tipoAposta = validatedData.type === 'dozen' ? 'dezena' : 
+                            validatedData.type === 'hundred' ? 'centena' : 'milhar';
+          
+          // Validação rigorosa: o número DEVE ter exatamente o tamanho esperado
+          if (num.length !== expectedLength) {
+            // Mensagem mais amigável para o usuário
+            return res.status(400).json({
+              message: `Para apostar na ${tipoAposta}, você deve digitar exatamente ${expectedLength} números. Por favor, tente novamente.`,
+              expectedLength: expectedLength,
+              receivedLength: num.length,
+              receivedValue: num
+            });
+          }
+          
+          // Verificar se contém apenas dígitos numéricos
+          if (!/^\d+$/.test(num)) {
+            return res.status(400).json({
+              message: `O número da aposta deve conter apenas dígitos (0-9). Valor recebido: "${num}"`
+            });
+          }
+        }
+        
+        // Se chegou aqui, todos os números estão corretos e não precisam de ajustes
+        console.log(`Números formatados corretamente: ${validatedData.betNumbers.join(', ')}`);
+        
+        // Log do tipo de aposta e números
+        console.log(`Number-based bet: ${validatedData.type} - ${validatedData.betNumbers.join(', ')}`);
+      }
+      // Verificar outros tipos de apostas (dezena duque, dezena terno)
+      else if (["duque_dezena"].includes(validatedData.type)) {
+        console.log("Validando aposta de duque dezena com body:", req.body);
+        
+        // Verificar todos os possíveis campos onde os números podem estar
+        if (req.body.numbers) {
+          // Tentar extrair múltiplas dezenas de uma string separada por vírgula, traço ou espaço
+          const extractedNumbers = req.body.numbers.split(/[,\s\-]+/).filter(n => n.trim().length > 0);
+          console.log(`Extraídos números de 'numbers': ${extractedNumbers.join(', ')}`);
+          
+          if (extractedNumbers.length > 0) {
+            if (!validatedData.betNumbers) validatedData.betNumbers = [];
+            validatedData.betNumbers = validatedData.betNumbers.concat(extractedNumbers);
+          }
+        }
+        
+        // Requer 2 dezenas
+        if (!validatedData.betNumbers || validatedData.betNumbers.length !== 2) {
+          return res.status(400).json({ message: "Duas dezenas são obrigatórias para apostas de duque de dezena" });
+        }
+        
+        // Formatar e validar cada dezena (2 dígitos)
+        validatedData.betNumbers = validatedData.betNumbers.map(num => {
+          let cleaned = num.replace(/\D/g, '');
+          while (cleaned.length < 2) cleaned = '0' + cleaned;
+          if (cleaned.length > 2) cleaned = cleaned.substring(cleaned.length - 2);
+          return cleaned;
+        });
+        
+        console.log(`Dezenas formatadas para duque: ${validatedData.betNumbers.join(', ')}`);
+        
+        // Validação final
+        if (validatedData.betNumbers.some(n => n.length !== 2)) {
+          return res.status(400).json({ message: "Apostas de duque de dezena devem ter dezenas com 2 dígitos" });
+        }
+        
+        console.log(`Duque dezena bet: ${validatedData.betNumbers.join(', ')}`);
+      }
+      else if (["terno_dezena"].includes(validatedData.type)) {
+        console.log("Validando aposta de terno dezena com body:", req.body);
+        
+        // Verificar todos os possíveis campos onde os números podem estar
+        if (req.body.numbers) {
+          // Tentar extrair múltiplas dezenas de uma string separada por vírgula, traço ou espaço
+          const extractedNumbers = req.body.numbers.split(/[,\s\-]+/).filter(n => n.trim().length > 0);
+          console.log(`Extraídos números de 'numbers': ${extractedNumbers.join(', ')}`);
+          
+          if (extractedNumbers.length > 0) {
+            if (!validatedData.betNumbers) validatedData.betNumbers = [];
+            validatedData.betNumbers = validatedData.betNumbers.concat(extractedNumbers);
+          }
+        }
+        
+        // Requer 3 dezenas
+        if (!validatedData.betNumbers || validatedData.betNumbers.length !== 3) {
+          return res.status(400).json({ message: "Três dezenas são obrigatórias para apostas de terno de dezena" });
+        }
+        
+        // Formatar e validar cada dezena (2 dígitos)
+        validatedData.betNumbers = validatedData.betNumbers.map(num => {
+          let cleaned = num.replace(/\D/g, '');
+          while (cleaned.length < 2) cleaned = '0' + cleaned;
+          if (cleaned.length > 2) cleaned = cleaned.substring(cleaned.length - 2);
+          return cleaned;
+        });
+        
+        console.log(`Dezenas formatadas para terno: ${validatedData.betNumbers.join(', ')}`);
+        
+        // Validação final
+        if (validatedData.betNumbers.some(n => n.length !== 2)) {
+          return res.status(400).json({ message: "Apostas de terno de dezena devem ter dezenas com 2 dígitos" });
+        }
+        
+        console.log(`Terno dezena bet: ${validatedData.betNumbers.join(', ')}`);
+      }
+      else {
+        return res.status(400).json({ message: `Tipo de aposta inválido: ${validatedData.type}` });
+      }
+      
+      // Verify game mode if provided
+      if (validatedData.gameModeId) {
+        console.log(`========= VERIFICANDO MODALIDADE =========`);
+        console.log(`Tipo de aposta: ${validatedData.type}`);
+        console.log(`GameModeID: ${validatedData.gameModeId}`);
+        console.log(`Números: ${validatedData.betNumbers?.join(', ') || 'nenhum'}`);
+        console.log(`=========================================`);
+        const gameMode = await storage.getGameMode(validatedData.gameModeId);
+        if (!gameMode) {
+          console.log(`Game mode not found: ${validatedData.gameModeId}`);
+          return res.status(404).json({ message: "Modalidade de jogo não encontrada" });
+        }
+        
+        console.log(`Game mode found: ${gameMode.name}, active: ${gameMode.active}`);
+        if (!gameMode.active) {
+          return res.status(400).json({ message: "Esta modalidade de jogo não está ativa no momento" });
+        }
+        
+        // Verificação rigorosa para garantir que o modo de jogo é compatível com o tipo de aposta
+        // Cria um mapeamento entre tipos de apostas e os IDs de game modes permitidos
+        interface GameModeMap {
+          thousand: number[];
+          hundred: number[];
+          dozen: number[];
+          [key: string]: number[];
+        }
+        
+        const allowedGameModes: GameModeMap = {
+          "thousand": [1], // ID 1 = Milhar
+          "hundred": [2],  // ID 2 = Centena
+          "dozen": [4]     // ID 4 = Dezena
+        };
+        
+        // Verifica se o tipo de aposta existe no mapeamento
+        if (validatedData.type in allowedGameModes) {
+          // Verifica se o gameMode.id está na lista de modos permitidos para este tipo
+          if (!allowedGameModes[validatedData.type].includes(gameMode.id)) {
+            console.log(`Invalid game mode for bet type. Type: ${validatedData.type}, GameMode ID: ${gameMode.id}, Allowed: ${allowedGameModes[validatedData.type].join(',')}`);
+            
+            // Determinar qual modalidade deveria ser usada
+            let suggestedGameMode = "";
+            if (validatedData.type === "thousand") suggestedGameMode = "Milhar";
+            else if (validatedData.type === "hundred") suggestedGameMode = "Centena";
+            else if (validatedData.type === "dozen") suggestedGameMode = "Dezena";
+            
+            return res.status(400).json({ 
+              message: `Tipo de aposta "${validatedData.type}" é incompatível com a modalidade "${gameMode.name}". Use a modalidade "${suggestedGameMode}".`,
+              gameModeSuggestion: suggestedGameMode,
+              currentGameMode: gameMode.name
+            });
+          }
+        }
+        
+        // Calculate potential win amount
+        const calculatedWinAmount = Math.floor(validatedData.amount * (gameMode.odds / 100));
+        console.log(`Game mode odds: ${gameMode.odds}, Amount: ${validatedData.amount}`);
+        console.log(`Calculated win amount: ${calculatedWinAmount}, Provided: ${validatedData.potentialWinAmount}`);
+        
+        // Verificar limite de premiação máxima
+        if (systemSettings && systemSettings.maxPayout && calculatedWinAmount > systemSettings.maxPayout) {
+          console.log(`Potential win amount exceeds maximum allowed: ${calculatedWinAmount} > ${systemSettings.maxPayout}`);
+          return res.status(400).json({ 
+            message: `A premiação máxima permitida é de R$ ${systemSettings.maxPayout}`,
+            calculatedPayout: calculatedWinAmount,
+            maxAllowed: systemSettings.maxPayout,
+            suggestion: `Reduza o valor da aposta para no máximo R$ ${Math.floor((systemSettings.maxPayout * 100) / gameMode.odds)}`
+          });
+        }
+        
+        // Verify the potential win amount if provided
+        if (validatedData.potentialWinAmount) {
+          // Allow a small difference due to floating point arithmetic
+          if (Math.abs(calculatedWinAmount - validatedData.potentialWinAmount) > 1) {
+            console.log(`Adjusting potential win amount from ${validatedData.potentialWinAmount} to ${calculatedWinAmount}`);
+            validatedData.potentialWinAmount = calculatedWinAmount;
+          }
+        } else {
+          // Calculate potential win amount if not provided
+          console.log(`Setting potential win amount to ${calculatedWinAmount}`);
+          validatedData.potentialWinAmount = calculatedWinAmount;
+        }
+      }
+      
+      console.log(`Deducting ${validatedData.amount} from user balance`);
+      // Deduct the bet amount from the user's balance
+      await storage.updateUserBalance(userId, -validatedData.amount);
+      
+      console.log("Creating bet in the database");
+      // Create the bet
+      const bet = await storage.createBet(validatedData);
+      
+      console.log("Bet created successfully:", bet);
+      res.status(201).json(bet);
+    } catch (error) {
+      console.error("Error creating bet:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Dados da aposta inválidos", errors: error.errors });
+      }
+      res.status(500).json({ message: "Erro ao criar aposta", error: String(error) });
+    }
+  });
+
+  // Get user bets
+  app.get("/api/bets", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      console.log(`Fetching bets for user ID: ${userId}`);
+      const bets = await storage.getBetsByUserId(userId);
+      console.log(`Found ${bets.length} bets for user ID: ${userId}`);
+      res.json(bets);
+    } catch (error) {
+      console.error("Error in GET /api/bets:", error);
+      res.status(500).json({ message: "Error fetching bets", error: String(error) });
+    }
+  });
+  
+  // Change user password
+  app.post("/api/user/change-password", requireAuth, async (req, res) => {
+    try {
+      const { currentPassword, newPassword } = req.body;
+      
+      // Verifica se a senha atual está correta
+      const user = await storage.getUserByUsername(req.user!.username);
+      if (!user) {
+        return res.status(404).json({ message: "Usuário não encontrado" });
+      }
+      
+      const isPasswordValid = await comparePasswords(currentPassword, user.password);
+      if (!isPasswordValid) {
+        return res.status(400).json({ message: "Senha atual incorreta" });
+      }
+      
+      // Atualiza a senha
+      const hashedPassword = await hashPassword(newPassword);
+      await storage.updateUser(user.id, { password: hashedPassword });
+      
+      res.status(200).json({ message: "Senha alterada com sucesso" });
+    } catch (error) {
+      console.error("Erro ao alterar senha:", error);
+      res.status(500).json({ message: "Erro ao alterar senha" });
+    }
+  });
+
+  // Update user balance (for deposits and withdrawals)
+  app.post("/api/users/balance", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const { amount, type } = req.body;
+      
+      if (!amount || typeof amount !== 'number' || !['deposit', 'withdraw'].includes(type)) {
+        return res.status(400).json({ message: "Invalid request data" });
+      }
+      
+      // Adicionar logs detalhados para depuração
+      console.log(`Request for ${type} operation with amount ${amount}`);
+      
+      // Verificar configurações do sistema para depósitos e saques
+      const systemSettings = await storage.getSystemSettings();
+      console.log("System settings:", JSON.stringify(systemSettings, null, 2));
+      
+      // Verificar explicitamente o valor de allowWithdrawals
+      if (type === 'withdraw') {
+        console.log(`Withdraw operation attempted. allowWithdrawals = ${systemSettings?.allowWithdrawals}`);
+        
+        // Se for um saque e saques estão desativados
+        if (systemSettings && systemSettings.allowWithdrawals === false) {
+          console.log("Withdrawals are disabled in system settings. Blocking operation.");
+          return res.status(403).json({ message: "Saques estão temporariamente desativados" });
+        }
+      }
+      
+      // Verificar explicitamente o valor de allowDeposits
+      if (type === 'deposit') {
+        console.log(`Deposit operation attempted. allowDeposits = ${systemSettings?.allowDeposits}`);
+        
+        // Se for um depósito e depósitos estão desativados
+        if (systemSettings && systemSettings.allowDeposits === false) {
+          console.log("Deposits are disabled in system settings. Blocking operation.");
+          return res.status(403).json({ message: "Depósitos estão temporariamente desativados" });
+        }
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      if (type === 'withdraw' && user.balance < amount) {
+        return res.status(400).json({ message: "Insufficient balance" });
+      }
+      
+      const finalAmount = type === 'deposit' ? amount : -amount;
+      console.log(`Proceeding with ${type} operation, updating balance by ${finalAmount}`);
+      const updatedUser = await storage.updateUserBalance(userId, finalAmount);
+      
+      res.json(updatedUser);
+    } catch (error) {
+      console.error("Error updating balance:", error);
+      res.status(500).json({ message: "Error updating balance" });
+    }
+  });
+
+  // Admin routes
+  
+  // Get all users (admin only)
+  app.get("/api/users", requireAdmin, async (req, res) => {
+    try {
+      const users = await storage.getAllUsers();
+      res.json(users);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching users" });
+    }
+  });
+
+  // Get all bets (admin only)
+  app.get("/api/admin/bets", requireAdmin, async (req, res) => {
+    try {
+      console.log("Admin fetching all bets");
+      const bets = await storage.getAllBets();
+      console.log(`Found ${bets.length} bets total`);
+      res.json(bets);
+    } catch (error) {
+      console.error("Error in GET /api/admin/bets:", error);
+      res.status(500).json({ message: "Error fetching bets", error: String(error) });
+    }
+  });
+
+  // Get popular animals/groups (admin only)
+  app.get("/api/admin/stats/popular", requireAdmin, async (req, res) => {
+    try {
+      const popularAnimals = await storage.getPopularAnimals();
+      res.json(popularAnimals);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching popular animals" });
+    }
+  });
+
+  // Create user (admin only)
+  app.post("/api/admin/users", requireAdmin, async (req, res) => {
+    try {
+      const validatedData = insertUserSchema.parse(req.body);
+      const user = await storage.createUser(validatedData);
+      res.status(201).json(user);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid user data", errors: error.errors });
+      }
+      res.status(500).json({ message: "Error creating user" });
+    }
+  });
+
+  // Update user (admin only)
+  app.put("/api/admin/users/:id", requireAdmin, async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      
+      // Validate user exists
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Update user
+      const updatedUser = await storage.updateUser(userId, req.body);
+      res.json(updatedUser);
+    } catch (error) {
+      res.status(500).json({ message: "Error updating user" });
+    }
+  });
+
+  // Delete user (admin only)
+  app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      
+      // Validate user exists and is not admin
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      if (user.isAdmin) {
+        return res.status(400).json({ message: "Cannot delete admin user" });
+      }
+      
+      // Delete user
+      await storage.deleteUser(userId);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ message: "Error deleting user" });
+    }
+  });
+
+  // Update user balance (admin only)
+  app.post("/api/admin/users/:id/balance", requireAdmin, async (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      const { amount } = req.body;
+      
+      if (typeof amount !== 'number') {
+        return res.status(400).json({ message: "Invalid amount" });
+      }
+      
+      // Validate user exists
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Update balance
+      const updatedUser = await storage.updateUserBalance(userId, amount);
+      res.json(updatedUser);
+    } catch (error) {
+      res.status(500).json({ message: "Error updating user balance" });
+    }
+  });
+
+  // Game Mode Routes
+
+  // Get all game modes
+  app.get("/api/game-modes", async (req, res) => {
+    try {
+      const gameModes = await storage.getAllGameModes();
+      res.json(gameModes);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching game modes" });
+    }
+  });
+
+  // Get game mode by ID
+  app.get("/api/game-modes/:id", async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const gameMode = await storage.getGameMode(id);
+      
+      if (!gameMode) {
+        return res.status(404).json({ message: "Game mode not found" });
+      }
+      
+      res.json(gameMode);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching game mode" });
+    }
+  });
+
+  // Create game mode (admin only)
+  app.post("/api/game-modes", requireAdmin, async (req, res) => {
+    try {
+      const validatedData = insertGameModeSchema.parse(req.body);
+      
+      // Check if a game mode with the same name already exists
+      const existing = await storage.getGameModeByName(validatedData.name);
+      if (existing) {
+        return res.status(400).json({ message: "A game mode with this name already exists" });
+      }
+      
+      const gameMode = await storage.createGameMode(validatedData);
+      res.status(201).json(gameMode);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid game mode data", errors: error.errors });
+      }
+      res.status(500).json({ message: "Error creating game mode" });
+    }
+  });
+
+  // Update game mode (admin only)
+  app.put("/api/game-modes/:id", requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      
+      // Validate game mode exists
+      const gameMode = await storage.getGameMode(id);
+      if (!gameMode) {
+        return res.status(404).json({ message: "Game mode not found" });
+      }
+      
+      // Check if name is being changed and if so, ensure no duplicates
+      if (req.body.name && req.body.name !== gameMode.name) {
+        const existing = await storage.getGameModeByName(req.body.name);
+        if (existing) {
+          return res.status(400).json({ message: "A game mode with this name already exists" });
+        }
+      }
+      
+      // Update game mode
+      const updatedGameMode = await storage.updateGameMode(id, req.body);
+      res.json(updatedGameMode);
+    } catch (error) {
+      res.status(500).json({ message: "Error updating game mode" });
+    }
+  });
+
+  // Delete game mode (admin only)
+  app.delete("/api/game-modes/:id", requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      
+      // Validate game mode exists
+      const gameMode = await storage.getGameMode(id);
+      if (!gameMode) {
+        return res.status(404).json({ message: "Game mode not found" });
+      }
+      
+      // Delete game mode
+      await storage.deleteGameMode(id);
+      res.status(204).send();
+    } catch (error) {
+      res.status(500).json({ message: "Error deleting game mode" });
+    }
+  });
+
+  // System Settings Routes
+  
+  // Get system settings (admin only)
+  app.get("/api/admin/settings", requireAdmin, async (req, res) => {
+    try {
+      // Check if settings exist in database, otherwise return defaults
+      const settings = await storage.getSystemSettings();
+      
+      if (settings) {
+        res.json(settings);
+      } else {
+        // Default values
+        const defaultSettings = {
+          maxBetAmount: 5000,
+          maxPayout: 50000,
+          mainColor: "#4f46e5",
+          secondaryColor: "#6366f1",
+          accentColor: "#f97316",
+          allowUserRegistration: true,
+          allowDeposits: true,
+          allowWithdrawals: true,
+          maintenanceMode: false
+        };
+        
+        // Save default settings to database
+        await storage.saveSystemSettings(defaultSettings);
+        res.json(defaultSettings);
+      }
+    } catch (error) {
+      console.error("Error fetching system settings:", error);
+      res.status(500).json({ message: "Error fetching system settings" });
+    }
+  });
+  
+  // Update system settings (admin only)
+  app.put("/api/admin/settings", requireAdmin, async (req, res) => {
+    try {
+      console.log("Updating system settings:", req.body);
+      
+      // Validate settings
+      const { maxBetAmount, maxPayout } = req.body;
+      if (maxBetAmount <= 0 || maxPayout <= 0) {
+        return res.status(400).json({ message: "Valores máximos devem ser positivos" });
+      }
+      
+      // Save settings to database
+      const updatedSettings = await storage.saveSystemSettings(req.body);
+      
+      // Return updated settings
+      res.json(updatedSettings);
+    } catch (error) {
+      console.error("Error updating system settings:", error);
+      res.status(500).json({ message: "Error updating system settings" });
+    }
+  });
+  
+  // Bet discharge route (admin only)
+  app.post("/api/admin/bets/discharge", requireAdmin, async (req, res) => {
+    try {
+      const { betId, drawId, note } = req.body;
+      
+      if (!betId || !drawId) {
+        return res.status(400).json({ message: "Missing required fields" });
+      }
+      
+      // Validate bet exists and is pending
+      const bet = await storage.getBet(betId);
+      if (!bet) {
+        return res.status(404).json({ message: "Bet not found" });
+      }
+      
+      if (bet.status !== "pending") {
+        return res.status(400).json({ message: "Only pending bets can be discharged" });
+      }
+      
+      // Validate draw exists and is pending
+      const draw = await storage.getDraw(drawId);
+      if (!draw) {
+        return res.status(404).json({ message: "Draw not found" });
+      }
+      
+      if (draw.status !== "pending") {
+        return res.status(400).json({ message: "Can only discharge to pending draws" });
+      }
+      
+      // Update the bet with the new draw ID
+      const updatedBet = await storage.updateBet(betId, { drawId });
+      
+      // Log the discharge action (in a real implementation, this would be saved to a log table)
+      console.log(`Bet ${betId} discharged from draw ${bet.drawId} to draw ${drawId}. Note: ${note || 'N/A'}`);
+      
+      res.json(updatedBet);
+    } catch (error) {
+      console.error("Error discharging bet:", error);
+      res.status(500).json({ message: "Error discharging bet" });
+    }
+  });
+
+  const httpServer = createServer(app);
+  return httpServer;
+}

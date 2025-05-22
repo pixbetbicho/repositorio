@@ -1,0 +1,148 @@
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Navbar } from "@/components/navbar";
+import { AdminStats } from "@/components/admin-stats";
+import { DrawManagement } from "@/components/draw-management";
+import { RecentUsers } from "@/components/recent-users";
+import { PopularGroups } from "@/components/popular-groups";
+import { BetManagement } from "@/components/bet-management";
+import { UserManagement } from "@/components/user-management";
+import { DrawResults } from "@/components/draw-results";
+import { AdminDashboardMetrics } from "@/components/admin-dashboard-metrics";
+import { GameModesManagement } from "@/components/game-modes-management";
+import { User, Bet } from "@/types";
+import { useAuth } from "@/hooks/use-auth";
+import { Redirect } from "wouter";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import { 
+  LayoutDashboard, 
+  Users, 
+  GanttChart, 
+  DollarSign, 
+  Trophy, 
+  Settings,
+  Sliders
+} from "lucide-react";
+
+export default function AdminDashboard() {
+  const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState("dashboard");
+  
+  const { data: users } = useQuery<User[]>({
+    queryKey: ["/api/users"],
+  });
+
+  const { data: bets } = useQuery<Bet[]>({
+    queryKey: ["/api/admin/bets"],
+  });
+
+  // Calculate admin stats
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const activeUsers = users?.length || 0;
+  
+  const todayBets = bets?.filter(bet => {
+    const betDate = new Date(bet.createdAt);
+    return betDate >= today;
+  }) || [];
+  
+  const todayRevenue = todayBets.reduce((sum, bet) => sum + bet.amount, 0);
+  
+  const totalPaidOut = bets?.reduce((sum, bet) => {
+    if (bet.status === "won" && bet.winAmount) {
+      return sum + bet.winAmount;
+    }
+    return sum;
+  }, 0) || 0;
+
+  // Make sure user is admin
+  if (user && !user.isAdmin) {
+    return <Redirect to="/" />;
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100">
+      <Navbar />
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="flex justify-between items-center mb-6">
+          <h1 className="text-3xl font-bold text-gray-800">Painel Administrativo</h1>
+          <div className="text-sm bg-gray-100 rounded-full px-4 py-2">
+            Admin: <span className="font-semibold">{user?.name || user?.username}</span>
+          </div>
+        </div>
+
+        <Tabs defaultValue="dashboard" className="space-y-4" onValueChange={setActiveTab}>
+          <TabsList className="grid w-full grid-cols-7">
+            <TabsTrigger value="dashboard" className="flex items-center space-x-2">
+              <LayoutDashboard className="h-4 w-4" />
+              <span>Dashboard</span>
+            </TabsTrigger>
+            <TabsTrigger value="users" className="flex items-center space-x-2">
+              <Users className="h-4 w-4" />
+              <span>Usuários</span>
+            </TabsTrigger>
+            <TabsTrigger value="draws" className="flex items-center space-x-2">
+              <GanttChart className="h-4 w-4" />
+              <span>Sorteios</span>
+            </TabsTrigger>
+            <TabsTrigger value="bets" className="flex items-center space-x-2">
+              <DollarSign className="h-4 w-4" />
+              <span>Apostas</span>
+            </TabsTrigger>
+            <TabsTrigger value="results" className="flex items-center space-x-2">
+              <Trophy className="h-4 w-4" />
+              <span>Resultados</span>
+            </TabsTrigger>
+            <TabsTrigger value="quotations" className="flex items-center space-x-2">
+              <Sliders className="h-4 w-4" />
+              <span>Cotações</span>
+            </TabsTrigger>
+            <TabsTrigger value="settings" className="flex items-center space-x-2">
+              <Settings className="h-4 w-4" />
+              <span>Configurações</span>
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="dashboard" className="space-y-4">
+            <AdminStats 
+              activeUsers={activeUsers}
+              todayRevenue={todayRevenue}
+              todayBets={todayBets.length}
+              totalPaidOut={totalPaidOut}
+            />
+            <AdminDashboardMetrics />
+          </TabsContent>
+
+          <TabsContent value="users" className="space-y-4">
+            <UserManagement />
+          </TabsContent>
+
+          <TabsContent value="draws" className="space-y-4">
+            <DrawManagement />
+          </TabsContent>
+
+          <TabsContent value="bets" className="space-y-4">
+            <BetManagement />
+          </TabsContent>
+
+          <TabsContent value="results" className="space-y-4">
+            <DrawResults />
+          </TabsContent>
+
+          <TabsContent value="settings" className="space-y-4">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <RecentUsers />
+              <PopularGroups />
+            </div>
+          </TabsContent>
+        </Tabs>
+      </main>
+    </div>
+  );
+}

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Página de Teste</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 16px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin-left: 8px;
+        }
+        .online {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .offline {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .loading {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0069d9;
+        }
+        pre {
+            background-color: #f8f9fa;
+            padding: 12px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Página de Diagnóstico</h1>
+    
+    <div class="card">
+        <h2>Status do Servidor</h2>
+        <p>
+            API: <span id="api-status" class="status loading">Verificando...</span>
+        </p>
+        <p>
+            Banco de Dados: <span id="db-status" class="status loading">Verificando...</span>
+        </p>
+        <button id="check-button">Verificar Novamente</button>
+    </div>
+    
+    <div class="card">
+        <h2>Configurações do Sistema</h2>
+        <pre id="settings-data">Carregando...</pre>
+    </div>
+    
+    <div class="card">
+        <h2>Informações do Usuário</h2>
+        <pre id="user-data">Carregando...</pre>
+    </div>
+    
+    <script>
+        // Função para verificar status da API
+        async function checkApiStatus() {
+            document.getElementById('api-status').className = 'status loading';
+            document.getElementById('api-status').textContent = 'Verificando...';
+            
+            try {
+                const response = await fetch('/api/settings');
+                if (response.ok) {
+                    document.getElementById('api-status').className = 'status online';
+                    document.getElementById('api-status').textContent = 'Online';
+                    
+                    const data = await response.json();
+                    document.getElementById('settings-data').textContent = JSON.stringify(data, null, 2);
+                    
+                    // Verificar também status do banco de dados
+                    document.getElementById('db-status').className = 'status online';
+                    document.getElementById('db-status').textContent = 'Conectado';
+                    
+                    return true;
+                } else {
+                    throw new Error('API respondeu com status ' + response.status);
+                }
+            } catch (error) {
+                document.getElementById('api-status').className = 'status offline';
+                document.getElementById('api-status').textContent = 'Offline: ' + error.message;
+                document.getElementById('settings-data').textContent = 'Erro ao carregar configurações';
+                
+                document.getElementById('db-status').className = 'status offline';
+                document.getElementById('db-status').textContent = 'Desconectado';
+                
+                return false;
+            }
+        }
+        
+        // Verificar informações do usuário
+        async function checkUserInfo() {
+            try {
+                const response = await fetch('/api/user');
+                if (response.ok) {
+                    const data = await response.json();
+                    document.getElementById('user-data').textContent = JSON.stringify(data, null, 2);
+                } else if (response.status === 401) {
+                    document.getElementById('user-data').textContent = 'Não autenticado. Faça login para ver os dados do usuário.';
+                } else {
+                    throw new Error('Erro ao obter dados do usuário: ' + response.status);
+                }
+            } catch (error) {
+                document.getElementById('user-data').textContent = 'Erro: ' + error.message;
+            }
+        }
+        
+        // Executar verificações assim que a página carregar
+        window.addEventListener('DOMContentLoaded', async () => {
+            const apiOnline = await checkApiStatus();
+            if (apiOnline) {
+                await checkUserInfo();
+            }
+            
+            // Configurar botão de verificação
+            document.getElementById('check-button').addEventListener('click', async () => {
+                const apiOnline = await checkApiStatus();
+                if (apiOnline) {
+                    await checkUserInfo();
+                }
+            });
+        });
+    </script>
+</body>
+</html>

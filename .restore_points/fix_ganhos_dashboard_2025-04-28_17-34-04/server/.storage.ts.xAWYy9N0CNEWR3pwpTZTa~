@@ -1,0 +1,414 @@
+import { users, type User, type InsertUser, Animal, InsertAnimal, Bet, InsertBet, Draw, InsertDraw, animals, bets, draws } from "@shared/schema";
+import express from "express";
+import session from "express-session";
+import { eq, and, gt, desc, asc, sql } from "drizzle-orm";
+import { db, pool } from "./db";
+import connectPg from "connect-pg-simple";
+import createMemoryStore from "memorystore";
+
+const MemoryStore = createMemoryStore(session);
+const PostgresSessionStore = connectPg(session);
+
+interface BetWithDetails extends Bet {
+  animal: Animal;
+  draw: Draw;
+}
+
+export interface IStorage {
+  // User Management
+  getUser(id: number): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+  updateUserBalance(userId: number, amount: number): Promise<User | undefined>;
+  getAllUsers(): Promise<User[]>;
+  
+  // Animal Management
+  getAnimal(id: number): Promise<Animal | undefined>;
+  getAnimalByGroup(group: number): Promise<Animal | undefined>;
+  getAllAnimals(): Promise<Animal[]>;
+  createAnimal(animal: InsertAnimal): Promise<Animal>;
+  
+  // Bet Management
+  createBet(bet: InsertBet): Promise<Bet>;
+  getBetsByUserId(userId: number): Promise<BetWithDetails[]>;
+  getBetsByDrawId(drawId: number): Promise<Bet[]>;
+  updateBetStatus(betId: number, status: string, winAmount?: number): Promise<Bet | undefined>;
+  getAllBets(): Promise<Bet[]>;
+  
+  // Draw Management
+  createDraw(draw: InsertDraw): Promise<Draw>;
+  getDraw(id: number): Promise<Draw | undefined>;
+  getUpcomingDraws(): Promise<Draw[]>;
+  updateDrawResult(drawId: number, resultAnimalId: number): Promise<Draw | undefined>;
+  getAllDraws(): Promise<Draw[]>;
+  
+  // Stats
+  getPopularAnimals(): Promise<{animalId: number, count: number}[]>;
+  
+  // Session store
+  sessionStore: any;
+}
+
+export class DatabaseStorage implements IStorage {
+  sessionStore: any;
+
+  constructor() {
+    this.sessionStore = new PostgresSessionStore({ 
+      pool, 
+      createTableIfMissing: true 
+    });
+    this.initializeData();
+  }
+
+  private async initializeData() {
+    try {
+      // Check if tables exist and create them using db.push
+      await this.createTables();
+      
+      // Check if animals table is empty
+      const animalCount = await db.select({ count: sql`count(*)` }).from(animals);
+      if (animalCount[0].count === BigInt(0)) {
+        await this.initializeAnimals();
+        await this.initializeAdmin();
+        await this.initializeDraws();
+      }
+    } catch (error) {
+      console.error("Error initializing data:", error);
+    }
+  }
+  
+  private async createTables() {
+    try {
+      // Create tables based on schema using raw query
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id SERIAL PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          password TEXT NOT NULL,
+          email TEXT,
+          name TEXT,
+          balance INTEGER NOT NULL DEFAULT 0,
+          is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+        );
+      `);
+      
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS animals (
+          id SERIAL PRIMARY KEY,
+          "group" INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          numbers TEXT[] NOT NULL,
+          UNIQUE("group")
+        );
+      `);
+      
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS draws (
+          id SERIAL PRIMARY KEY,
+          name TEXT NOT NULL,
+          time TEXT NOT NULL,
+          date TIMESTAMP WITH TIME ZONE NOT NULL,
+          status TEXT NOT NULL,
+          result_animal_id INTEGER,
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+        );
+      `);
+      
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS bets (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          animal_id INTEGER NOT NULL,
+          amount INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+          draw_id INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          win_amount INTEGER
+        );
+      `);
+      
+      console.log("Tables created successfully");
+    } catch (error) {
+      console.error("Error creating tables:", error);
+      throw error;
+    }
+  }
+
+  private async initializeAnimals() {
+    const animalData: InsertAnimal[] = [
+      { group: 1, name: "Avestruz", numbers: ["01", "02", "03", "04"] },
+      { group: 2, name: "Águia", numbers: ["05", "06", "07", "08"] },
+      { group: 3, name: "Burro", numbers: ["09", "10", "11", "12"] },
+      { group: 4, name: "Borboleta", numbers: ["13", "14", "15", "16"] },
+      { group: 5, name: "Cachorro", numbers: ["17", "18", "19", "20"] },
+      { group: 6, name: "Cabra", numbers: ["21", "22", "23", "24"] },
+      { group: 7, name: "Carneiro", numbers: ["25", "26", "27", "28"] },
+      { group: 8, name: "Camelo", numbers: ["29", "30", "31", "32"] },
+      { group: 9, name: "Cobra", numbers: ["33", "34", "35", "36"] },
+      { group: 10, name: "Coelho", numbers: ["37", "38", "39", "40"] },
+      { group: 11, name: "Cavalo", numbers: ["41", "42", "43", "44"] },
+      { group: 12, name: "Elefante", numbers: ["45", "46", "47", "48"] },
+      { group: 13, name: "Galo", numbers: ["49", "50", "51", "52"] },
+      { group: 14, name: "Gato", numbers: ["53", "54", "55", "56"] },
+      { group: 15, name: "Jacaré", numbers: ["57", "58", "59", "60"] },
+      { group: 16, name: "Leão", numbers: ["61", "62", "63", "64"] },
+      { group: 17, name: "Macaco", numbers: ["65", "66", "67", "68"] },
+      { group: 18, name: "Porco", numbers: ["69", "70", "71", "72"] },
+      { group: 19, name: "Pavão", numbers: ["73", "74", "75", "76"] },
+      { group: 20, name: "Peru", numbers: ["77", "78", "79", "80"] },
+      { group: 21, name: "Touro", numbers: ["81", "82", "83", "84"] },
+      { group: 22, name: "Tigre", numbers: ["85", "86", "87", "88"] },
+      { group: 23, name: "Urso", numbers: ["89", "90", "91", "92"] },
+      { group: 24, name: "Veado", numbers: ["93", "94", "95", "96"] },
+      { group: 25, name: "Vaca", numbers: ["97", "98", "99", "00"] }
+    ];
+
+    for (const animal of animalData) {
+      await this.createAnimal(animal);
+    }
+  }
+
+  private async initializeAdmin() {
+    // Check if admin exists
+    const adminExists = await this.getUserByUsername("admin");
+    if (!adminExists) {
+      // Create an admin user
+      await db.insert(users).values({
+        username: "admin",
+        password: "admin", // In production, this should be hashed
+        email: "admin@bichomania.com",
+        name: "Administrator",
+        balance: 0,
+        isAdmin: true,
+        createdAt: new Date(),
+      });
+    }
+  }
+
+  private async initializeDraws() {
+    // Create upcoming draws
+    const times = ["14:00", "16:00", "18:00", "20:00"];
+    const names = ["Federal", "PTM", "Coruja", "Noturno"];
+    
+    const today = new Date();
+    
+    for (let i = 0; i < times.length; i++) {
+      const drawDate = new Date(today);
+      drawDate.setHours(parseInt(times[i].split(':')[0]), parseInt(times[i].split(':')[1]), 0, 0);
+      
+      // If time already passed today, schedule for tomorrow
+      if (drawDate < today) {
+        drawDate.setDate(drawDate.getDate() + 1);
+      }
+      
+      await this.createDraw({
+        name: names[i],
+        time: times[i],
+        date: drawDate,
+      });
+    }
+  }
+
+  // User Management
+  async getUser(id: number): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const [user] = await db.insert(users).values({
+      ...insertUser,
+      balance: 0,
+      isAdmin: false,
+      createdAt: new Date(),
+    }).returning();
+    return user;
+  }
+
+  async updateUserBalance(userId: number, amount: number): Promise<User | undefined> {
+    const [user] = await db
+      .update(users)
+      .set({
+        balance: sql`${users.balance} + ${amount}`,
+      })
+      .where(eq(users.id, userId))
+      .returning();
+    return user;
+  }
+
+  async getAllUsers(): Promise<User[]> {
+    return await db.select().from(users);
+  }
+
+  // Animal Management
+  async getAnimal(id: number): Promise<Animal | undefined> {
+    const [animal] = await db.select().from(animals).where(eq(animals.id, id));
+    return animal;
+  }
+
+  async getAnimalByGroup(group: number): Promise<Animal | undefined> {
+    const [animal] = await db.select().from(animals).where(eq(animals.group, group));
+    return animal;
+  }
+
+  async getAllAnimals(): Promise<Animal[]> {
+    return await db.select().from(animals).orderBy(animals.group);
+  }
+
+  async createAnimal(insertAnimal: InsertAnimal): Promise<Animal> {
+    const [animal] = await db.insert(animals).values(insertAnimal).returning();
+    return animal;
+  }
+
+  // Bet Management
+  async createBet(insertBet: InsertBet): Promise<Bet> {
+    const [bet] = await db.insert(bets).values({
+      ...insertBet,
+      createdAt: new Date(),
+      status: "pending",
+      winAmount: null,
+    }).returning();
+    return bet;
+  }
+
+  async getBetsByUserId(userId: number): Promise<BetWithDetails[]> {
+    const userBets = await db.select().from(bets).where(eq(bets.userId, userId));
+    
+    const betsWithDetails: BetWithDetails[] = [];
+    
+    for (const bet of userBets) {
+      const animal = await this.getAnimal(bet.animalId);
+      const draw = await this.getDraw(bet.drawId);
+      
+      if (animal && draw) {
+        betsWithDetails.push({
+          ...bet,
+          animal,
+          draw,
+        });
+      }
+    }
+    
+    return betsWithDetails;
+  }
+
+  async getBetsByDrawId(drawId: number): Promise<Bet[]> {
+    return await db.select().from(bets).where(eq(bets.drawId, drawId));
+  }
+
+  async updateBetStatus(betId: number, status: string, winAmount?: number): Promise<Bet | undefined> {
+    const updateData: Partial<Bet> = { status };
+    if (winAmount !== undefined) {
+      updateData.winAmount = winAmount;
+    }
+    
+    const [bet] = await db
+      .update(bets)
+      .set(updateData)
+      .where(eq(bets.id, betId))
+      .returning();
+    return bet;
+  }
+
+  async getAllBets(): Promise<Bet[]> {
+    return await db.select().from(bets);
+  }
+
+  // Draw Management
+  async createDraw(insertDraw: InsertDraw): Promise<Draw> {
+    const [draw] = await db.insert(draws).values({
+      ...insertDraw,
+      status: "pending",
+      resultAnimalId: null,
+      createdAt: new Date(),
+    }).returning();
+    return draw;
+  }
+
+  async getDraw(id: number): Promise<Draw | undefined> {
+    const [draw] = await db.select().from(draws).where(eq(draws.id, id));
+    return draw;
+  }
+
+  async getUpcomingDraws(): Promise<Draw[]> {
+    const now = new Date();
+    return await db
+      .select()
+      .from(draws)
+      .where(
+        and(
+          eq(draws.status, "pending"),
+          gt(draws.date, now)
+        )
+      )
+      .orderBy(asc(draws.date));
+  }
+
+  async updateDrawResult(drawId: number, resultAnimalId: number): Promise<Draw | undefined> {
+    const [draw] = await db
+      .update(draws)
+      .set({
+        status: "completed",
+        resultAnimalId,
+      })
+      .where(eq(draws.id, drawId))
+      .returning();
+    
+    if (!draw) return undefined;
+    
+    // Process bets for this draw
+    const drawBets = await this.getBetsByDrawId(drawId);
+    
+    for (const bet of drawBets) {
+      if (bet.animalId === resultAnimalId) {
+        // Winner - calculate win amount based on type
+        let multiplier = 1;
+        switch (bet.type) {
+          case "simple": multiplier = 18; break;
+          case "head": multiplier = 4; break;
+          case "group": multiplier = 2; break;
+        }
+        
+        const winAmount = bet.amount * multiplier;
+        await this.updateBetStatus(bet.id, "won", winAmount);
+        await this.updateUserBalance(bet.userId, winAmount);
+      } else {
+        // Loser
+        await this.updateBetStatus(bet.id, "lost");
+      }
+    }
+    
+    return draw;
+  }
+
+  async getAllDraws(): Promise<Draw[]> {
+    return await db.select().from(draws);
+  }
+
+  // Stats
+  async getPopularAnimals(): Promise<{animalId: number, count: number}[]> {
+    const result = await db
+      .select({
+        animalId: bets.animalId,
+        count: sql`count(*)::int`,
+      })
+      .from(bets)
+      .groupBy(bets.animalId)
+      .orderBy(desc(sql`count(*)`));
+    
+    // Explicitly cast the count to number
+    return result.map(item => ({
+      animalId: item.animalId,
+      count: Number(item.count)
+    }));
+  }
+}
+
+export const storage = new DatabaseStorage();
