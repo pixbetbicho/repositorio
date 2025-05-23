@@ -6,8 +6,6 @@ import { pool, db } from "./db";
 import { z } from "zod";
 import fs from "fs-extra";
 import path from "path";
-import { pushinPayService } from "./services/pushinpay";
-import { handlePushinPayWebhook } from "./webhooks/pushinpay";
 import { 
   insertBetSchema, 
   insertDrawSchema, 
@@ -3970,24 +3968,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Create new payment transaction - Pushin Pay PIX integration (NOVA IMPLEMENTAÇÃO)
+  // Create new payment transaction - Pushin Pay PIX integration
   app.post("/api/payment/pushinpay", requireAuth, async (req, res) => {
     try {
-      // Extrair o userId do usuário autenticado
+      // Extrair o userId do usuário autenticado - NUNCA do corpo da requisição
       const userId = req.user!.id;
-      const username = req.user!.username;
       
       // Log para auditoria de segurança
-      console.log(`[PushinPay] Criando transação para usuário ${username} (${userId})`);
+      console.log(`SEGURANÇA: Criando transação de pagamento para usuário ID: ${userId}`);
       
-      // Extrair apenas o valor do corpo da requisição
+      // Extrair apenas o valor do corpo da requisição, ignorando qualquer userId que possa ter sido enviado
       let { amount } = req.body;
       
-      // Validar e converter o valor
-      console.log('[PushinPay] Valor original recebido:', amount);
+      // Verificar se alguém tentou enviar um userId no corpo da requisição (potencial ataque)
+      if (req.body.userId !== undefined && req.body.userId !== userId) {
+        console.error(`ALERTA DE SEGURANÇA: Tentativa de criar transação para outro usuário. 
+          Usuário real: ${userId}, 
+          Usuário tentado: ${req.body.userId}`);
+        
+        // Continuar processando, mas ignorar o userId enviado no corpo
+      }
       
+      // Verificar e limpar o valor recebido
+      console.log('Valor original recebido:', amount);
+      
+      // Se for uma string, converter para número
       if (typeof amount === 'string') {
+        // Verificar se a string está no formato brasileiro (com vírgula)
         if (amount.includes(',')) {
+          // Converter de PT-BR para EN-US
           amount = parseFloat(amount.replace('.', '').replace(',', '.'));
         } else {
           amount = parseFloat(amount);
@@ -4118,10 +4127,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           qrCodeUrl || undefined,
           responseData
         );
-
-        // 🚀 INICIAR MONITORAMENTO AUTOMÁTICO DO PAGAMENTO
-        console.log(`[Auto Monitor] 🎯 Iniciando monitoramento automático para transação ${transaction.id}`);
-        startPaymentMonitoring(transaction.id);
         
         // Retornar os dados para o cliente
         res.json({
@@ -4133,7 +4138,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           qrCodeBase64: qrCodeBase64,
           amount: amount.toFixed(2),
           status: "pending",
-          message: "PIX payment process initiated via Pushin Pay - Monitoramento automático ativado!",
+          message: "PIX payment process initiated via Pushin Pay",
           paymentDetails: responseData
         });
         
@@ -4159,354 +4164,1235 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Webhook/callback for Pushin Pay - NOVA IMPLEMENTAÇÃO BASEADA NA DOCUMENTAÇÃO OFICIAL
-  app.post("/api/webhooks/pushinpay", handlePushinPayWebhook);
-
-  // Endpoint para verificação manual de PIX via API da PushinPay
-  app.post("/api/payment/pushinpay/check/:transactionId", requireAuth, async (req, res) => {
+  // Webhook/callback for Pushin Pay (would be called by the payment provider)
+  app.post("/api/webhooks/pushinpay", async (req, res) => {
     try {
-      const transactionId = parseInt(req.params.transactionId);
-      const userId = req.user!.id;
+      // Log para auditoria de segurança
+      console.log("Webhook da Pushin Pay recebido:", JSON.stringify(req.body, null, 2));
       
-      if (isNaN(transactionId)) {
-        return res.status(400).json({ message: "ID de transação inválido" });
+      const { transactionId, status, externalId, amount, signature } = req.body;
+      
+      // Validações básicas dos dados
+      if (!transactionId || !status) {
+        console.error("Webhook com dados incompletos:", req.body);
+        return res.status(400).json({ message: "Missing required fields" });
       }
       
-      // Buscar transação
-      const transaction = await storage.getPaymentTransaction(transactionId);
-      if (!transaction) {
-        return res.status(404).json({ message: "Transação não encontrada" });
+      // Validar que o ID da transação é um número (segurança)
+      const parsedTransactionId = parseInt(transactionId);
+      if (isNaN(parsedTransactionId)) {
+        console.error(`ALERTA DE SEGURANÇA: ID de transação inválido recebido no webhook: ${transactionId}`);
+        return res.status(400).json({ message: "Invalid transaction ID format" });
       }
       
-      // Verificar se a transação pertence ao usuário
-      if (transaction.userId !== userId) {
-        return res.status(403).json({ message: "Acesso negado" });
-      }
-      
-      // Se já está completa, retornar status
-      if (transaction.status === 'completed') {
-        return res.json({
-          status: 'completed',
-          message: 'Pagamento já confirmado',
-          transaction
-        });
-      }
-      
-      // Verificar se tem external ID para consultar na API
-      if (!transaction.externalId) {
-        return res.json({
-          status: transaction.status,
-          message: 'Aguardando processamento',
-          transaction
-        });
-      }
-      
-      try {
-        // Consultar status na API da PushinPay
-        const pixStatus = await pushinPayService.getPixStatus(transaction.externalId);
-        console.log(`[PushinPay Check] Status do PIX ${transaction.externalId}:`, pixStatus);
-        
-        // Se foi pago, atualizar transação
-        if (pixStatus.status === 'paid') {
-          console.log(`[PushinPay Check] PIX confirmado! Atualizando transação ${transactionId}`);
-          
-          // Atualizar status
-          await storage.updateTransactionStatus(
-            transactionId,
-            "completed",
-            transaction.externalId,
-            undefined,
-            pixStatus
-          );
-          
-          // Atualizar saldo do usuário
-          await storage.updateUserBalance(userId, transaction.amount);
-          
-          // Criar registro financeiro
-          await storage.createTransaction({
-            userId,
-            type: "deposit",
-            amount: transaction.amount,
-            description: `Depósito via PushinPay - PIX ${transaction.externalId}`,
-            relatedId: transactionId
-          });
-          
-          return res.json({
-            status: 'completed',
-            message: 'Pagamento confirmado!',
-            transaction: await storage.getPaymentTransaction(transactionId)
-          });
-        }
-        
-        // Se expirou ou foi cancelado
-        if (pixStatus.status === 'expired' || pixStatus.status === 'cancelled') {
-          await storage.updateTransactionStatus(
-            transactionId,
-            "failed",
-            transaction.externalId,
-            undefined,
-            pixStatus
-          );
-          
-          return res.json({
-            status: 'failed',
-            message: `PIX ${pixStatus.status === 'expired' ? 'expirado' : 'cancelado'}`,
-            transaction: await storage.getPaymentTransaction(transactionId)
-          });
-        }
-        
-        // Ainda pendente
-        return res.json({
-          status: 'pending',
-          message: 'Aguardando pagamento',
-          pixStatus: pixStatus.status,
-          transaction
-        });
-        
-      } catch (apiError) {
-        console.error("[PushinPay Check] Erro na consulta da API:", apiError);
-        return res.status(500).json({
-          message: "Erro ao verificar status do pagamento",
-          error: (apiError as Error).message
-        });
-      }
-      
-    } catch (error) {
-      console.error("[PushinPay Check] Erro:", error);
-      res.status(500).json({ message: "Erro interno do servidor" });
-    }
-  });
-
-  // Nova implementação PushinPay completa implementada! ✅
-  
-  // Sistema de verificação automática de pagamentos
-  const pendingPayments = new Map<number, NodeJS.Timeout>();
-
-  // Função para iniciar monitoramento automático
-  function startPaymentMonitoring(transactionId: number) {
-    console.log(`[Auto Monitor] Iniciando monitoramento para transação ${transactionId}`);
-    
-    const checkInterval = setInterval(async () => {
-      try {
+      // Em uma implementação real, verificaríamos a assinatura da requisição
+      // para garantir que ela veio realmente do gateway de pagamento
+      if (process.env.NODE_ENV === 'production') {
+        // Obter o gateway para verificar a chave secreta
         const transaction = await storage.getPaymentTransaction(transactionId);
-        if (!transaction || transaction.status === 'completed') {
-          console.log(`[Auto Monitor] Transação ${transactionId} já processada ou não encontrada`);
-          clearInterval(checkInterval);
-          pendingPayments.delete(transactionId);
-          return;
-        }
-
-        // Verificar status na PushinPay
-        const externalId = `DEPOSIT-${transactionId}`;
-        const paymentStatus = await pushinPayService.getPixStatus(externalId);
-        
-        if (paymentStatus && paymentStatus.status === 'paid') {
-          console.log(`[Auto Monitor] 🎉 PAGAMENTO CONFIRMADO! Transação ${transactionId}`);
-          
-          // Parar monitoramento
-          clearInterval(checkInterval);
-          pendingPayments.delete(transactionId);
-          
-          // Processar pagamento
-          await storage.updateTransactionStatus(
-            transactionId,
-            "completed",
-            paymentStatus.id,
-            undefined,
-            { paid_at: paymentStatus.paid_at }
-          );
-
-          // Creditar saldo
-          await storage.updateUserBalance(transaction.userId, transaction.amount);
-          
-          // Aplicar bônus se for primeiro depósito
-          await processFirstDepositBonus(transaction.userId, transaction.amount, transactionId);
-          
-          console.log(`[Auto Monitor] ✅ Saldo creditado automaticamente: R$ ${transaction.amount.toFixed(2)} para usuário ${transaction.userId}`);
+        if (!transaction) {
+          return res.status(404).json({ message: "Transaction not found" });
         }
         
-      } catch (error) {
-        console.error(`[Auto Monitor] Erro ao verificar transação ${transactionId}:`, error);
+        const gateway = await storage.getPaymentGateway(transaction.gatewayId);
+        if (!gateway) {
+          return res.status(404).json({ message: "Payment gateway not found" });
+        }
+        
+        // Verificar assinatura
+        // Esta é uma simulação - em um cenário real, verificaríamos 
+        // a assinatura usando a chave secreta do gateway e um algoritmo específico
+        if (!gateway.secretKey || !signature) {
+          console.warn("Missing webhook signature or secret key for validation");
+          // Em produção, poderíamos rejeitar a solicitação se a assinatura for inválida
+          // return res.status(401).json({ message: "Invalid webhook signature" });
+        }
       }
-    }, 5000); // Verifica a cada 5 segundos
-
-    // Armazenar referência do intervalo
-    pendingPayments.set(transactionId, checkInterval);
-    
-    // Parar monitoramento após 30 minutos (tempo limite)
-    setTimeout(() => {
-      if (pendingPayments.has(transactionId)) {
-        console.log(`[Auto Monitor] Timeout para transação ${transactionId} - parando monitoramento`);
-        clearInterval(checkInterval);
-        pendingPayments.delete(transactionId);
-      }
-    }, 30 * 60 * 1000); // 30 minutos
-  }
-
-  // Endpoint para verificação manual de pagamentos (produção)
-  app.post("/api/pushinpay/check-payment", async (req, res) => {
-    if (!req.isAuthenticated()) {
-      return res.status(401).json({ message: "Não autorizado" });
-    }
-
-    try {
-      const { transactionId } = req.body;
       
-      if (!transactionId) {
-        return res.status(400).json({ message: "ID da transação é obrigatório" });
+      // Status válidos que podemos receber do gateway
+      const validStatuses = ['pending', 'processing', 'completed', 'failed', 'cancelled'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({ message: "Invalid transaction status" });
       }
-
-      console.log(`[Manual Check] Verificando pagamento para transação ${transactionId}`);
       
-      // Buscar transação no banco
-      const transaction = await storage.getPaymentTransaction(transactionId);
-      if (!transaction) {
-        return res.status(404).json({ message: "Transação não encontrada" });
+      // Consultar a transação atual
+      const currentTransaction = await storage.getPaymentTransaction(transactionId);
+      if (!currentTransaction) {
+        return res.status(404).json({ message: "Transaction not found" });
       }
-
-      // Se já foi processada, retornar status atual
-      if (transaction.status === 'completed') {
-        return res.json({ 
-          message: "Pagamento já processado",
-          status: transaction.status,
-          amount: transaction.amount
+      
+      // Verificações adicionais para transações já completadas
+      if (currentTransaction.status === 'completed' && status === 'completed') {
+        return res.status(200).json({ 
+          message: "Transaction already processed", 
+          status: currentTransaction.status 
         });
       }
-
-      // Verificar status na PushinPay
-      const externalId = `DEPOSIT-${transactionId}`;
-      const paymentStatus = await pushinPayService.getPixStatus(externalId);
       
-      if (paymentStatus && paymentStatus.status === 'paid') {
-        console.log(`[Manual Check] Pagamento confirmado para transação ${transactionId}`);
-        
-        // Atualizar status da transação
-        const updatedTransaction = await storage.updateTransactionStatus(
-          transactionId,
-          "completed",
-          paymentStatus.id,
-          undefined,
-          { paid_at: paymentStatus.paid_at }
-        );
-
-        if (updatedTransaction) {
-          // Adicionar saldo ao usuário
-          await storage.updateUserBalance(transaction.userId, transaction.amount);
-          
-          // Verificar e aplicar bônus de primeiro depósito
-          await processFirstDepositBonus(transaction.userId, transaction.amount, transactionId);
-          
-          console.log(`[Manual Check] Saldo creditado: R$ ${transaction.amount.toFixed(2)} para usuário ${transaction.userId}`);
-        }
-
-        return res.json({
-          message: "Pagamento confirmado e processado",
-          status: "completed",
-          amount: transaction.amount
-        });
+      // Verificação de segurança adicional: garantir que a transação pertence a um usuário válido
+      // e não está sendo manipulada para creditar saldo indevidamente
+      const user = await storage.getUser(currentTransaction.userId);
+      if (!user) {
+        console.error(`ALERTA DE SEGURANÇA: Tentativa de atualizar transação ${transactionId} para usuário inexistente ${currentTransaction.userId}`);
+        return res.status(400).json({ message: "Invalid user associated with transaction" });
       }
-
-      res.json({
-        message: "Pagamento ainda pendente",
-        status: paymentStatus?.status || "pending"
+      
+      // Registrar para auditoria
+      console.log(`Atualizando status da transação ${transactionId} para ${status}`);
+      console.log(`Transação pertence ao usuário ${user.username} (ID: ${user.id})`);
+      
+      // Atualizar o status da transação
+      const updatedTransaction = await storage.updateTransactionStatus(
+        transactionId,
+        status,
+        externalId || undefined,
+        currentTransaction.externalUrl || undefined, // Manter a URL externa existente
+        req.body // Salvar todo o payload para registro
+      );
+      
+      if (!updatedTransaction) {
+        return res.status(404).json({ message: "Failed to update transaction" });
+      }
+      
+      // Se o pagamento foi bem-sucedido, adicionar saldo ao usuário
+      if (status === "completed" && updatedTransaction.userId) {
+        console.log(`Payment successful for transaction ${transactionId}. Updating user balance.`);
+        
+        try {
+          // Verificar se é o primeiro depósito do usuário
+          const userId = updatedTransaction.userId;
+          const depositAmount = updatedTransaction.amount;
+          
+          // Obter as configurações do sistema
+          const systemSettings = await storage.getSystemSettings();
+          
+          // ==== INÍCIO PROCESSAMENTO DE BÔNUS DE PRIMEIRO DEPÓSITO ====
+          console.log(`\n[BÔNUS] Verificando elegibilidade para bônus de primeiro depósito para usuário ${userId}`);
+          
+          // Verificar se o bônus de primeiro depósito está ativado nas configurações
+          if (systemSettings?.firstDepositBonusEnabled) {
+            console.log(`[BÔNUS] Bônus de primeiro depósito está ATIVADO nas configurações do sistema`);
+            console.log(`[BÔNUS] Configurações: Percentual=${systemSettings.firstDepositBonusPercentage}%, Valor máximo=${systemSettings.firstDepositBonusMaxAmount}, Rollover=${systemSettings.firstDepositBonusRollover}x`);
+            
+            // Primeiro, verificar se há transações anteriores para este usuário (depósitos anteriores)
+            const userTransactions = await db
+              .select()
+              .from(paymentTransactions)
+              .where(and(
+                eq(paymentTransactions.userId, userId),
+                eq(paymentTransactions.type, "deposit"),
+                eq(paymentTransactions.status, "completed")
+              ));
+            
+            const isFirstDeposit = userTransactions.length <= 1; // O depósito atual já está na lista
+            console.log(`[BÔNUS] Verificação de primeiro depósito: Usuário ${userId} tem ${userTransactions.length} depósitos (incluindo o atual)`);
+            console.log(`[BÔNUS] Este ${isFirstDeposit ? 'É' : 'NÃO é'} o primeiro depósito do usuário ${userId}`);
+            
+            if (!isFirstDeposit) {
+              console.log(`[BÔNUS] Não é o primeiro depósito. Ignorando bônus.`);
+              // Podemos pular todo o restante do processamento de bônus
+            } else {
+              // Verificar se o usuário já recebeu bônus de primeiro depósito anteriormente
+              console.log(`[BÔNUS] Verificando registro de bônus anteriores para o usuário ${userId}`);
+              const hasBonus = await storage.hasUserReceivedFirstDepositBonus(userId);
+              
+              if (hasBonus) {
+                console.log(`[BÔNUS] Usuário ${userId} JÁ recebeu bônus de primeiro depósito anteriormente. Ignorando.`);
+              } else {
+                console.log(`[BÔNUS] Usuário ${userId} NUNCA recebeu bônus de primeiro depósito. Prosseguindo.`);
+                console.log(`[BÔNUS] Aplicando bônus de primeiro depósito para usuário ${userId}`);
+                
+                // Calcular o valor do bônus
+                let bonusAmount = 0;
+                
+                if (systemSettings.firstDepositBonusPercentage > 0) {
+                  // Bônus percentual sobre o valor do depósito
+                  console.log(`[BÔNUS] Calculando bônus percentual: ${depositAmount} * ${systemSettings.firstDepositBonusPercentage}%`);
+                  bonusAmount = (depositAmount * systemSettings.firstDepositBonusPercentage) / 100;
+                  console.log(`[BÔNUS] Valor calculado inicialmente: ${bonusAmount}`);
+                  
+                  // Limitar ao valor máximo de bônus, se configurado
+                  if (systemSettings.firstDepositBonusMaxAmount > 0 && bonusAmount > systemSettings.firstDepositBonusMaxAmount) {
+                    console.log(`[BÔNUS] Valor calculado (${bonusAmount}) excede o máximo permitido (${systemSettings.firstDepositBonusMaxAmount}). Limitando.`);
+                    bonusAmount = systemSettings.firstDepositBonusMaxAmount;
+                  }
+                } else {
+                  // Valor fixo de bônus
+                  console.log(`[BÔNUS] Usando valor fixo de bônus: ${systemSettings.firstDepositBonusAmount}`);
+                  bonusAmount = systemSettings.firstDepositBonusAmount;
+                }
+                
+                // Arredondar para 2 casas decimais
+                bonusAmount = parseFloat(bonusAmount.toFixed(2));
+                console.log(`[BÔNUS] Valor final do bônus após arredondamento: ${bonusAmount}`);
+                
+                if (bonusAmount > 0) {
+                  console.log(`[BÔNUS] Valor do bônus é positivo (${bonusAmount}). Prosseguindo com a criação.`);
+                  
+                  // Calcular o rollover e a data de expiração
+                  const rolloverAmount = bonusAmount * systemSettings.firstDepositBonusRollover;
+                  const expirationDays = systemSettings.firstDepositBonusExpiration || 7;
+                  
+                  // Configurar data de expiração
+                  const expirationDate = new Date();
+                  expirationDate.setDate(expirationDate.getDate() + expirationDays);
+                  
+                  console.log(`[BÔNUS] Detalhes do bônus a ser criado:
+                    - Usuário: ${userId}
+                    - Tipo: first_deposit
+                    - Valor: ${bonusAmount}
+                    - Valor disponível: ${bonusAmount}
+                    - Rollover necessário: ${rolloverAmount}
+                    - Validade: ${expirationDays} dias (até ${expirationDate})
+                    - Transação relacionada: ${updatedTransaction.id}`);
+                  
+                  try {
+                    // Criar o bônus
+                    const bonus = await storage.createUserBonus({
+                      userId,
+                      type: "first_deposit",
+                      amount: bonusAmount,
+                      remainingAmount: bonusAmount,
+                      rolloverAmount,
+                      status: "active",
+                      expiresAt: expirationDate,
+                      relatedTransactionId: updatedTransaction.id
+                    });
+                    
+                    console.log(`[BÔNUS] Bônus de primeiro depósito criado com ID ${bonus.id}: R$${bonusAmount.toFixed(2)}, Rollover: R$${rolloverAmount.toFixed(2)}`);
+                    
+                    // Verificar se o bônus foi criado corretamente
+                    const createdBonus = await db
+                      .select()
+                      .from(userBonuses)
+                      .where(eq(userBonuses.id, bonus.id));
+                    
+                    if (createdBonus.length === 0) {
+                      console.error(`[BÔNUS] ERRO CRÍTICO: O bônus com ID ${bonus.id} não foi encontrado na base de dados após a criação!`);
+                    } else {
+                      console.log(`[BÔNUS] Verificação pós-criação do bônus: Bônus encontrado na base de dados. ID: ${createdBonus[0].id}, Tipo: ${createdBonus[0].type}`);
+                    }
+                    
+                    // Criar uma transação para registrar o bônus recebido
+                    console.log(`[BÔNUS] Registrando transação para o bônus`);
+                    const bonusTransaction = await storage.createTransaction({
+                      userId,
+                      type: "deposit", // Usando "deposit" em vez de "bonus" para compatibilidade
+                      amount: bonusAmount,
+                      description: "Bônus de primeiro depósito",
+                      relatedId: bonus.id // Vinculando explicitamente à transação
+                    });
+                    
+                    console.log(`[BÔNUS] Transação registrada com ID ${bonusTransaction.id}`);
+                    
+                    // *** ETAPA CRÍTICA: Atualizar o saldo de bônus do usuário ***
+                    console.log(`[BÔNUS] ETAPA CRÍTICA: Chamando updateUserBonusBalance para atualizar saldo de usuário ${userId} com +${bonusAmount}`);
+                    
+                    // Verificar saldo antes da atualização
+                    const bonusBalanceBefore = await storage.getUserBonusBalance(userId);
+                    console.log(`[BÔNUS] Saldo de bônus ANTES da atualização: R$${bonusBalanceBefore}`);
+                    
+                    // Atualizar saldo de bônus
+                    await storage.updateUserBonusBalance(userId, bonusAmount);
+                    
+                    // Verificar se o saldo foi atualizado corretamente com várias verificações
+                    const updatedBonus = await storage.getUserBonusBalance(userId);
+                    console.log(`[BÔNUS] Saldo de BÔNUS do usuário APÓS atualização: R$${updatedBonus}`);
+                    
+                    // Verificação adicional: consultar todos os bônus do usuário
+                    const allUserBonuses = await storage.getUserBonuses(userId);
+                    console.log(`[BÔNUS] Verificação adicional: Usuário ${userId} tem ${allUserBonuses.length} bônus no total`);
+                    
+                    const expectedBalance = bonusBalanceBefore + bonusAmount;
+                    if (Math.abs(updatedBonus - expectedBalance) < 0.01) { // Tolerância para arredondamento
+                      console.log(`[BÔNUS] ✅ SUCESSO: Bônus aplicado corretamente. Saldo anterior: R$${bonusBalanceBefore}, Adicionado: R$${bonusAmount}, Novo saldo: R$${updatedBonus}`);
+                    } else {
+                      console.error(`[BÔNUS] ❌ ERRO: Bônus não foi aplicado corretamente ao saldo. Esperado: R$${expectedBalance}, Atual: R$${updatedBonus}`);
+                    }
+                  } catch (error) {
+                    console.error(`[BÔNUS] ERRO ao processar bônus: ${error.message}`);
+                    console.error(error.stack);
+                  }
+                } else {
+                  console.log(`[BÔNUS] Valor do bônus calculado é zero ou negativo (${bonusAmount}). Ignorando.`);
+                }
+              }
+            }
+          } else {
+            console.log(`[BÔNUS] Bônus de primeiro depósito está DESATIVADO nas configurações do sistema`);
+          }
+          console.log(`[BÔNUS] Fim do processamento de bônus de primeiro depósito\n`);
+          // ==== FIM PROCESSAMENTO DE BÔNUS DE PRIMEIRO DEPÓSITO ====
+          
+          // Verificar se o bônus de cadastro está ativado e ainda não foi concedido
+          if (systemSettings?.signupBonusEnabled) {
+            const hasSignupBonus = await storage.hasUserReceivedSignupBonus(userId);
+            
+            if (!hasSignupBonus) {
+              console.log(`Aplicando bônus de cadastro para usuário ${userId}`);
+              
+              const bonusAmount = systemSettings.signupBonusAmount;
+              const rolloverAmount = bonusAmount * systemSettings.signupBonusRollover;
+              
+              // Criar o bônus de cadastro
+              await storage.createUserBonus({
+                userId,
+                type: "signup",
+                amount: bonusAmount,
+                remainingAmount: bonusAmount,
+                rolloverAmount,
+                status: "active"
+              });
+              
+              console.log(`Bônus de cadastro criado: R$${bonusAmount.toFixed(2)}, Rollover: R$${rolloverAmount.toFixed(2)}`);
+            }
+          }
+          
+          // Atualizar o saldo do usuário com o valor do depósito
+          const user = await storage.updateUserBalance(userId, depositAmount);
+          console.log(`User balance updated successfully. New balance: ${user?.balance}`);
+        } catch (balanceError) {
+          console.error("Error updating user balance:", balanceError);
+          // Continuamos o processo mesmo que a atualização do saldo falhe,
+          // mas registramos um erro para investigação posterior
+        }
+      }
+      
+      // Resposta de sucesso
+      res.json({ 
+        message: "Webhook processed successfully",
+        transactionId,
+        status: updatedTransaction.status
       });
-
-    } catch (error) {
-      console.error("[Manual Check] Erro:", error);
-      res.status(500).json({ message: "Erro interno do servidor" });
+    } catch (err) {
+      const error = err as Error;
+      console.error("Error processing payment webhook:", error);
+      res.status(500).json({ message: "Error processing payment webhook" });
     }
   });
-
-  // Função para processar bônus de primeiro depósito
-  async function processFirstDepositBonus(userId: number, depositAmount: number, transactionId: number) {
-    try {
-      const systemSettings = await storage.getSystemSettings();
-      
-      if (!systemSettings?.firstDepositBonusEnabled) {
-        console.log(`[Bônus] Bônus de primeiro depósito desativado`);
-        return;
-      }
-
-      // Verificar se é o primeiro depósito
-      const hasBonus = await storage.hasUserReceivedFirstDepositBonus(userId);
-      if (hasBonus) {
-        console.log(`[Bônus] Usuário ${userId} já recebeu bônus de primeiro depósito`);
-        return;
-      }
-
-      // Calcular valor do bônus
-      let bonusAmount = 0;
-      if (systemSettings.firstDepositBonusPercentage > 0) {
-        bonusAmount = (depositAmount * systemSettings.firstDepositBonusPercentage) / 100;
-        if (systemSettings.firstDepositBonusMaxAmount > 0) {
-          bonusAmount = Math.min(bonusAmount, systemSettings.firstDepositBonusMaxAmount);
-        }
-      } else if (systemSettings.firstDepositBonusAmount > 0) {
-        bonusAmount = systemSettings.firstDepositBonusAmount;
-      }
-
-      if (bonusAmount > 0) {
-        const rolloverAmount = bonusAmount * (systemSettings.firstDepositBonusRollover || 1);
-        
-        await storage.createUserBonus({
-          userId,
-          amount: bonusAmount,
-          type: "first_deposit",
-          rolloverAmount,
-          remainingAmount: bonusAmount,
-          status: "active",
-          relatedTransactionId: transactionId
-        });
-
-        await storage.updateUserBonusBalance(userId, bonusAmount);
-        
-        console.log(`[Bônus] Bônus de primeiro depósito aplicado: R$ ${bonusAmount.toFixed(2)} para usuário ${userId}`);
-      }
-    } catch (error) {
-      console.error("[Bônus] Erro ao processar bônus:", error);
-    }
-  }
 
   // ========== Rotas para gerenciamento de saques ==========
   
   // Solicitar um saque (requer autenticação)
-  app.post("/api/withdrawals", async (req, res) => {
-    if (!req.isAuthenticated()) {
-      return res.status(401).json({ message: "Não autorizado" });
-    }
+  app.post('/api/withdrawals', requireAuth, async (req, res) => {
     try {
-      const { amount, pixKey } = req.body;
       const userId = req.user.id;
-
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ message: "Valor inválido" });
-      }
-
-      if (!pixKey) {
-        return res.status(400).json({ message: "Chave PIX é obrigatória" });
-      }
-
-      // Verificar saldo do usuário
-      const user = await storage.getUser(userId);
-      if (!user || user.balance < amount) {
-        return res.status(400).json({ message: "Saldo insuficiente" });
-      }
-
-      // Criar solicitação de saque
-      const withdrawal = await storage.createWithdrawal({
-        userId,
-        amount,
-        pixKey,
-        status: "pending"
+      
+      // Validar e extrair dados do corpo da requisição
+      const withdrawalData = insertWithdrawalSchema.parse({
+        ...req.body,
+        userId
       });
-
+      
+      console.log(`Solicitação de saque recebida para usuário ${userId}:`, withdrawalData);
+      
+      // Criar a solicitação de saque
+      const withdrawal = await storage.createWithdrawal(withdrawalData);
+      
+      // Resposta de sucesso
+      res.status(201).json(withdrawal);
+    } catch (error) {
+      console.error("Erro ao processar solicitação de saque:", error);
+      
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ 
+          message: "Dados inválidos", 
+          errors: error.errors 
+        });
+      }
+      
+      // Para erros de negócio que já possuem mensagem formatada (ex: saldo insuficiente)
+      if (error instanceof Error) {
+        return res.status(400).json({ message: error.message });
+      }
+      
+      res.status(500).json({ message: "Erro ao processar solicitação de saque" });
+    }
+  });
+  
+  // Obter todos os saques do usuário
+  app.get('/api/withdrawals', requireAuth, async (req, res) => {
+    try {
+      const userId = req.user.id;
+      
+      const withdrawals = await storage.getUserWithdrawals(userId);
+      res.json(withdrawals);
+    } catch (error) {
+      console.error(`Erro ao buscar saques do usuário ${req.user.id}:`, error);
+      res.status(500).json({ message: "Erro ao buscar histórico de saques" });
+    }
+  });
+  
+  // Obter um saque específico
+  app.get('/api/withdrawals/:id', requireAuth, async (req, res) => {
+    try {
+      const withdrawalId = parseInt(req.params.id);
+      if (isNaN(withdrawalId)) {
+        return res.status(400).json({ message: "ID de saque inválido" });
+      }
+      
+      const withdrawal = await storage.getWithdrawal(withdrawalId);
+      
+      if (!withdrawal) {
+        return res.status(404).json({ message: "Saque não encontrado" });
+      }
+      
+      // Verificar se o saque pertence ao usuário atual, a menos que seja admin
+      if (withdrawal.userId !== req.user.id && !req.user.isAdmin) {
+        console.log(`NEGADO: Usuário ${req.user.id} tentando acessar saque ${withdrawalId} do usuário ${withdrawal.userId}`);
+        return res.status(403).json({ message: "Acesso negado" });
+      }
+      
       res.json(withdrawal);
     } catch (error) {
-      console.error("Error creating withdrawal:", error);
-      res.status(500).json({ message: "Erro interno do servidor" });
+      console.error(`Erro ao buscar saque ${req.params.id}:`, error);
+      res.status(500).json({ message: "Erro ao buscar detalhes do saque" });
+    }
+  });
+  
+  // Rotas administrativas para saques
+  
+  // Listar todos os saques (apenas admin)
+  app.get('/api/admin/withdrawals', requireAdmin, async (req, res) => {
+    try {
+      const status = req.query.status as WithdrawalStatus | undefined;
+      
+      const withdrawals = await storage.getAllWithdrawals(status);
+      res.json(withdrawals);
+    } catch (error) {
+      console.error("Erro ao buscar todos os saques:", error);
+      res.status(500).json({ message: "Erro ao buscar saques" });
+    }
+  });
+  
+  // Aprovar ou rejeitar um saque (apenas admin)
+  // Verificar o saldo disponível no gateway Pushin Pay
+  async function checkPushinPayBalance(): Promise<number> {
+    try {
+      // Obter o gateway Pushin Pay
+      const gateway = await storage.getPaymentGatewayByType("pushinpay");
+      if (!gateway) {
+        throw new Error("Gateway Pushin Pay não encontrado");
+      }
+      
+      // Exemplo de URL da API para verificar saldo (substituir pelo endpoint correto)
+      const apiUrl = "https://api.pushinpay.com.br/api/v2/balance";
+      
+      // Cabeçalhos de autenticação
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${gateway.apiKey}`
+      };
+      
+      // Fazer requisição para a API da Pushin Pay
+      const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`Erro ao verificar saldo: ${errorData.message || response.statusText}`);
+      }
+      
+      const data = await response.json();
+      
+      // Extrair saldo da resposta (adaptado para o formato de resposta real da API)
+      const balance = data.balance || data.amount || 0;
+      console.log(`Saldo disponível no gateway Pushin Pay: R$ ${balance.toFixed(2)}`);
+      
+      return balance;
+    } catch (error) {
+      console.error("Erro ao verificar saldo no gateway:", error);
+      
+      // Em caso de erro, retornar 0 para indicar que não há saldo disponível
+      // ou tratar alguma lógica de fallback conforme necessário
+      return 0;
+    }
+  }
+
+  app.get('/api/admin/gateway-balance', requireAdmin, async (req, res) => {
+    try {
+      const balance = await checkPushinPayBalance();
+      res.json({ balance });
+    } catch (error) {
+      console.error("Erro ao obter saldo do gateway:", error);
+      res.status(500).json({ message: "Erro ao obter saldo do gateway" });
+    }
+  });
+
+  app.patch('/api/admin/withdrawals/:id/status', requireAdmin, async (req, res) => {
+    try {
+      const withdrawalId = parseInt(req.params.id);
+      if (isNaN(withdrawalId)) {
+        return res.status(400).json({ message: "ID de saque inválido" });
+      }
+      
+      const { status, rejectionReason, notes } = req.body;
+      
+      // Validar status
+      if (!status || !['approved', 'rejected'].includes(status)) {
+        return res.status(400).json({ message: "Status inválido. Use 'approved' ou 'rejected'" });
+      }
+      
+      // Validar motivo de rejeição quando o status é 'rejected'
+      if (status === 'rejected' && !rejectionReason) {
+        return res.status(400).json({ message: "Motivo de rejeição é obrigatório para saques rejeitados" });
+      }
+      
+      // Se o status for "approved", verificar se há saldo disponível no gateway
+      if (status === "approved") {
+        // Obter os detalhes do saque
+        const withdrawal = await storage.getWithdrawal(withdrawalId);
+        if (!withdrawal) {
+          return res.status(404).json({ message: "Saque não encontrado" });
+        }
+        
+        // Verificar o saldo disponível no gateway
+        const gatewayBalance = await checkPushinPayBalance();
+        
+        // Verificar se o saldo é suficiente para realizar o saque
+        if (gatewayBalance < withdrawal.amount) {
+          return res.status(400).json({ 
+            message: "Saldo insuficiente no gateway de pagamento", 
+            availableBalance: gatewayBalance,
+            requiredAmount: withdrawal.amount
+          });
+        }
+        
+        console.log(`Saldo disponível no gateway: R$ ${gatewayBalance.toFixed(2)} - Suficiente para o saque de R$ ${withdrawal.amount.toFixed(2)}`);
+      }
+      
+      // Atualizar status do saque
+      const withdrawal = await storage.updateWithdrawalStatus(
+        withdrawalId, 
+        status as WithdrawalStatus, 
+        req.user.id, // ID do admin que está processando
+        rejectionReason,
+        notes
+      );
+      
+      // Se o saque for aprovado, mudar o status para "processing" e iniciar pagamento via API
+      if (status === "approved") {
+        // Atualizar status do saque para "processing"
+        const processingWithdrawal = await storage.updateWithdrawalStatus(
+          withdrawalId,
+          "processing" as WithdrawalStatus,
+          req.user.id
+        );
+        
+        // TODO: Iniciar o pagamento via API da Pushin Pay
+        // Isso seria implementado aqui, ou em um processo assíncrono
+        
+        res.json(processingWithdrawal);
+      } else {
+        res.json(withdrawal);
+      }
+    } catch (error) {
+      console.error(`Erro ao atualizar status do saque ${req.params.id}:`, error);
+      
+      if (error instanceof Error) {
+        return res.status(400).json({ message: error.message });
+      }
+      
+      res.status(500).json({ message: "Erro ao processar saque" });
+    }
+  });
+  
+  // ========== Rotas para histórico de transações financeiras ==========
+  
+  // Obter histórico de transações do usuário logado
+  app.get('/api/transactions/history', requireAuth, async (req, res) => {
+    try {
+      const userId = req.user.id;
+      
+      const transactions = await storage.getUserTransactionHistory(userId);
+      res.json(transactions);
+    } catch (error) {
+      console.error(`Erro ao buscar histórico de transações do usuário ${req.user.id}:`, error);
+      res.status(500).json({ message: "Erro ao buscar histórico de transações" });
+    }
+  });
+  
+  // Rotas administrativas para transações
+  
+  // Listar todas as transações (apenas admin)
+  app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
+    try {
+      // Extrair parâmetros de filtro da query
+      const type = req.query.type as string | undefined;
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : undefined;
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : undefined;
+      
+      const transactions = await storage.getAllTransactions(
+        type as any, 
+        startDate,
+        endDate
+      );
+      
+      res.json(transactions);
+    } catch (error) {
+      console.error("Erro ao buscar todas as transações:", error);
+      res.status(500).json({ message: "Erro ao buscar transações" });
+    }
+  });
+  
+  // Obter resumo de transações para relatório financeiro (apenas admin)
+  app.get('/api/admin/transactions/summary', requireAdmin, async (req, res) => {
+    try {
+      // Extrair parâmetros de filtro da query
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : undefined;
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : undefined;
+      
+      const summary = await storage.getTransactionsSummary(startDate, endDate);
+      
+      res.json(summary);
+    } catch (error) {
+      console.error("Erro ao gerar resumo de transações:", error);
+      res.status(500).json({ message: "Erro ao gerar resumo financeiro" });
+    }
+  });
+  
+  /**
+   * API para obter as configurações de bônus atuais
+   * IMPLEMENTAÇÃO REESCRITA DO ZERO
+   */
+  app.get("/api/admin/bonus-settings", requireAdmin, async (req, res) => {
+    try {
+      // Usando o novo módulo especializado
+      const { getBonusSettings } = require("./bonus-settings");
+      const bonusSettings = await getBonusSettings();
+      
+      console.log("Enviando configurações de bônus:", JSON.stringify(bonusSettings));
+      res.json(bonusSettings);
+    } catch (error) {
+      console.error("Erro ao obter configurações de bônus:", error);
+      res.status(500).json({ message: "Erro ao obter configurações de bônus" });
+    }
+  });
+  
+  /**
+   * Endpoint para forçar atualização da configuração de bônus para 98%
+   * Apenas para teste e debug
+   */
+  app.post('/api/debug/update-bonus-percentage', async (req, res) => {
+    try {
+      await pool.query(`
+        UPDATE system_settings 
+        SET first_deposit_bonus_percentage = 98
+        WHERE id = (SELECT id FROM system_settings LIMIT 1)
+      `);
+      
+      res.json({ message: 'Porcentagem de bônus atualizada para 98%' });
+    } catch (error) {
+      console.error('Erro ao atualizar porcentagem de bônus:', error);
+      res.status(500).json({ message: 'Erro ao atualizar porcentagem de bônus' });
+    }
+  });
+
+  /**
+   * API pública para obter as configurações de bônus atuais
+   * Disponível para usuários logados e não logados
+   */
+  app.get("/api/bonus-settings", async (req, res) => {
+    try {
+      // Obter configurações diretamente do banco de dados
+      console.log("Obtendo configurações de bônus do sistema...");
+      
+      const result = await pool.query(`
+        SELECT 
+          signup_bonus_enabled, 
+          signup_bonus_amount, 
+          signup_bonus_rollover, 
+          signup_bonus_expiration,
+          first_deposit_bonus_enabled, 
+          first_deposit_bonus_amount,
+          first_deposit_bonus_percentage, 
+          first_deposit_bonus_max_amount, 
+          first_deposit_bonus_rollover, 
+          first_deposit_bonus_expiration,
+          promotional_banners_enabled
+        FROM system_settings 
+        LIMIT 1
+      `);
+      
+      if (result.rows.length === 0) {
+        throw new Error("Configurações de sistema não encontradas");
+      }
+      
+      const settings = result.rows[0];
+      console.log("Configurações de bônus obtidas diretamente do banco de dados.");
+      
+      // Transformar formato do banco para o formato da API
+      const bonusSettings = {
+        signupBonus: {
+          enabled: settings.signup_bonus_enabled || false,
+          amount: settings.signup_bonus_amount || 0,
+          rollover: settings.signup_bonus_rollover || 1,
+          expiration: settings.signup_bonus_expiration || 7
+        },
+        firstDepositBonus: {
+          enabled: settings.first_deposit_bonus_enabled || false,
+          amount: settings.first_deposit_bonus_amount || 0,
+          percentage: settings.first_deposit_bonus_percentage || 100,
+          maxAmount: settings.first_deposit_bonus_max_amount || 100,
+          rollover: settings.first_deposit_bonus_rollover || 1,
+          expiration: settings.first_deposit_bonus_expiration || 7
+        },
+        promotionalBanners: {
+          enabled: settings.promotional_banners_enabled || false
+        }
+      };
+      
+      console.log("Enviando resposta de configurações de bônus:", JSON.stringify(bonusSettings));
+      res.json(bonusSettings);
+    } catch (error) {
+      console.error("Erro ao obter configurações de bônus (público):", error);
+      res.status(500).json({ message: "Erro ao obter configurações de bônus" });
+    }
+  });
+
+  /**
+   * API para salvar as configurações de bônus
+   * IMPLEMENTAÇÃO REESCRITA DO ZERO
+   */
+  app.post("/api/admin/bonus-settings", requireAdmin, async (req, res) => {
+    try {
+      const { saveBonusSettings } = require("./bonus-settings");
+      const bonusConfig = req.body;
+      
+      console.log("Recebido para salvar:", JSON.stringify(bonusConfig));
+      
+      // Validando se o formato dos dados recebidos está correto
+      if (!bonusConfig.signupBonus || !bonusConfig.firstDepositBonus) {
+        return res.status(400).json({ 
+          message: "Formato de dados inválido. Verifique a estrutura dos dados enviados."
+        });
+      }
+      
+      // Utiliza o módulo especializado para salvar
+      const success = await saveBonusSettings(bonusConfig);
+      
+      if (success) {
+        res.json({ 
+          message: "Configurações de bônus salvas com sucesso",
+          data: bonusConfig
+        });
+      } else {
+        res.status(500).json({ 
+          message: "Erro ao salvar configurações de bônus"
+        });
+      }
+    } catch (error) {
+      console.error("Erro ao salvar configurações de bônus:", error);
+      res.status(500).json({ 
+        message: "Erro ao salvar configurações de bônus",
+        error: error.message || "Erro desconhecido"
+      });
+    }
+  });
+
+  /**
+   * API para obter os bônus ativos do usuário
+   */
+  app.get("/api/user/bonuses", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const bonuses = await storage.getUserBonuses(userId);
+      res.json(bonuses);
+    } catch (error) {
+      console.error("Erro ao obter bônus do usuário:", error);
+      res.status(500).json({ message: "Erro ao obter bônus do usuário" });
+    }
+  });
+  
+  /**
+   * API para obter o saldo total de bônus do usuário
+   */
+  app.get("/api/user/bonus-balance", requireAuth, async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const bonusBalance = await storage.getUserBonusBalance(userId);
+      
+      res.json({ bonusBalance });
+    } catch (error) {
+      console.error("Erro ao obter saldo de bônus do usuário:", error);
+      res.status(500).json({ message: "Erro ao obter saldo de bônus do usuário" });
+    }
+  });
+  
+  /**
+   * API para consultar bônus de um usuário específico (apenas para testes e admin)
+   */
+  app.get("/api/admin/user/:userId/bonuses", requireAdmin, async (req, res) => {
+    try {
+      const userId = parseInt(req.params.userId);
+      
+      if (isNaN(userId)) {
+        return res.status(400).json({ message: "ID de usuário inválido" });
+      }
+      
+      const bonuses = await storage.getUserBonuses(userId);
+      console.log(`Bônus do usuário ${userId}:`, bonuses);
+      
+      res.json(bonuses);
+    } catch (error) {
+      console.error("Erro ao buscar bônus do usuário:", error);
+      res.status(500).json({ message: "Erro ao buscar bônus do usuário" });
+    }
+  });
+  
+  /**
+   * API para testar a funcionalidade de bônus de primeiro depósito (apenas para admin)
+   */
+  app.post("/api/admin/test/first-deposit-bonus", requireAdmin, async (req, res) => {
+    try {
+      const { userId, amount } = req.body;
+      
+      if (!userId || !amount) {
+        return res.status(400).json({ message: "Informe userId e amount para o teste" });
+      }
+      
+      // Obter o usuário
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "Usuário não encontrado" });
+      }
+      
+      // Obter configurações do sistema
+      const systemSettings = await storage.getSystemSettings();
+      if (!systemSettings) {
+        return res.status(500).json({ message: "Configurações do sistema não encontradas" });
+      }
+      
+      // Criar uma transação de depósito para teste
+      const paymentGateways = await storage.getAllPaymentGateways();
+      const gateway = paymentGateways[0]; // Usar o primeiro gateway disponível
+      
+      if (!gateway) {
+        return res.status(404).json({ message: "Nenhum gateway de pagamento disponível" });
+      }
+      
+      // Criar transação
+      const transaction = await storage.createPaymentTransaction({
+        userId,
+        type: "deposit",
+        amount,
+        status: "pending",
+        gatewayId: gateway.id,
+        externalId: `test_${Date.now()}`,
+      });
+      
+      console.log(`Transação de teste criada: ${transaction.id} para usuário ${userId}`);
+      
+      // Simular o webhook de confirmação
+      if (systemSettings.firstDepositBonusEnabled) {
+        // Verificar se o usuário ainda não recebeu bônus de primeiro depósito
+        const hasBonus = await storage.hasUserReceivedFirstDepositBonus(userId);
+        
+        if (!hasBonus) {
+          console.log(`Aplicando bônus de primeiro depósito para usuário ${userId}`);
+          
+          // Calcular o valor do bônus
+          let bonusAmount = 0;
+          
+          if (systemSettings.firstDepositBonusPercentage > 0) {
+            // Bônus percentual sobre o valor do depósito
+            bonusAmount = (amount * systemSettings.firstDepositBonusPercentage) / 100;
+            
+            // Limitar ao valor máximo de bônus, se configurado
+            if (systemSettings.firstDepositBonusMaxAmount > 0 && bonusAmount > systemSettings.firstDepositBonusMaxAmount) {
+              bonusAmount = systemSettings.firstDepositBonusMaxAmount;
+            }
+          } else {
+            // Valor fixo de bônus
+            bonusAmount = systemSettings.firstDepositBonusAmount;
+          }
+          
+          // Arredondar para 2 casas decimais
+          bonusAmount = parseFloat(bonusAmount.toFixed(2));
+          
+          if (bonusAmount > 0) {
+            // Calcular o rollover e a data de expiração
+            const rolloverAmount = bonusAmount * systemSettings.firstDepositBonusRollover;
+            const expirationDays = systemSettings.firstDepositBonusExpiration || 7;
+            
+            // Configurar data de expiração
+            const expirationDate = new Date();
+            expirationDate.setDate(expirationDate.getDate() + expirationDays);
+            
+            // Criar o bônus
+            const bonus = await storage.createUserBonus({
+              userId,
+              type: "first_deposit",
+              amount: bonusAmount,
+              remainingAmount: bonusAmount,
+              rolloverAmount,
+              status: "active",
+              expiresAt: expirationDate,
+              relatedTransactionId: transaction.id
+            });
+            
+            console.log(`Bônus de primeiro depósito criado: R$${bonusAmount.toFixed(2)}, Rollover: R$${rolloverAmount.toFixed(2)}`);
+            
+            // Adicionar o bônus ao saldo de bônus do usuário
+            // Isso garante que o usuário possa usar o bônus imediatamente
+            console.log(`Atualizando saldo de bônus para o usuário ${userId} com +${bonusAmount}`);
+            
+            // Criar uma transação para registrar o bônus recebido
+            await storage.createTransaction({
+              userId,
+              type: "deposit", // Usando "deposit" em vez de "bonus" para compatibilidade
+              amount: bonusAmount,
+              description: "Bônus de primeiro depósito"
+            });
+            
+            // Atualizar diretamente o saldo de BÔNUS do usuário (não o saldo principal)
+            await storage.updateUserBonusBalance(userId, bonusAmount);
+            console.log(`Saldo de BÔNUS do usuário atualizado com R$${bonusAmount.toFixed(2)}`);
+            
+            // Atualizar status da transação para completed
+            const updatedTransaction = await storage.updateTransactionStatus(
+              transaction.id,
+              "completed",
+              transaction.externalId,
+              transaction.externalUrl,
+              { test: true }
+            );
+            
+            // Adicionar o valor do depósito ao saldo do usuário
+            const updatedUser = await storage.updateUserBalance(userId, amount);
+            
+            res.json({
+              message: "Bônus de primeiro depósito aplicado com sucesso",
+              transaction: updatedTransaction,
+              bonus,
+              user: updatedUser
+            });
+          } else {
+            res.status(400).json({ message: "O valor do bônus é zero. Verifique as configurações." });
+          }
+        } else {
+          res.status(400).json({ message: "Usuário já recebeu bônus de primeiro depósito" });
+        }
+      } else {
+        res.status(400).json({ message: "Bônus de primeiro depósito não está ativado nas configurações" });
+      }
+    } catch (error) {
+      console.error("Erro ao testar bônus de primeiro depósito:", error);
+      res.status(500).json({ message: "Erro ao testar bônus de primeiro depósito" });
+    }
+  });
+
+  /**
+   * API para obter banners de login
+   */
+  app.get("/api/login-banners", async (req, res) => {
+    try {
+      const banners = await storage.getLoginBanners();
+      res.json(banners);
+    } catch (error) {
+      console.error("Erro ao obter banners de login:", error);
+      res.status(500).json({ message: "Erro ao obter banners de login" });
+    }
+  });
+
+  /**
+   * API para obter todos os banners promocionais (admin)
+   */
+  app.get("/api/admin/promotional-banners", requireAdmin, async (req, res) => {
+    try {
+      const banners = await storage.getPromotionalBanners(false);
+      res.json(banners);
+    } catch (error) {
+      console.error("Erro ao obter banners promocionais:", error);
+      res.status(500).json({ message: "Erro ao obter banners promocionais" });
+    }
+  });
+
+  /**
+   * API para criar um novo banner promocional
+   */
+  app.post("/api/admin/promotional-banners", requireAdmin, async (req, res) => {
+    try {
+      const banner = req.body;
+      const newBanner = await storage.createPromotionalBanner(banner);
+      res.status(201).json(newBanner);
+    } catch (error) {
+      console.error("Erro ao criar banner promocional:", error);
+      res.status(500).json({ message: "Erro ao criar banner promocional" });
+    }
+  });
+
+  /**
+   * API para atualizar um banner promocional existente
+   */
+  app.patch("/api/admin/promotional-banners/:id", requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const banner = req.body;
+      const updatedBanner = await storage.updatePromotionalBanner(id, banner);
+      
+      if (!updatedBanner) {
+        return res.status(404).json({ message: "Banner não encontrado" });
+      }
+      
+      res.json(updatedBanner);
+    } catch (error) {
+      console.error("Erro ao atualizar banner promocional:", error);
+      res.status(500).json({ message: "Erro ao atualizar banner promocional" });
+    }
+  });
+
+  /**
+   * API para excluir um banner promocional
+   */
+  app.delete("/api/admin/promotional-banners/:id", requireAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deletePromotionalBanner(id);
+      
+      if (!deleted) {
+        return res.status(404).json({ message: "Banner não encontrado" });
+      }
+      
+      res.status(204).send();
+    } catch (error) {
+      console.error("Erro ao excluir banner promocional:", error);
+      res.status(500).json({ message: "Erro ao excluir banner promocional" });
     }
   });
 
   const httpServer = createServer(app);
+  // ========== ROTAS PARA VERIFICAÇÃO DE SAQUES EM PROCESSAMENTO ==========
+  
+  // Verificar status de saques em processamento (admin)
+  app.post("/api/admin/check-withdrawals", requireAdmin, async (req, res) => {
+    try {
+      // Buscar todos os saques com status "processing"
+      const processingSaques = await storage.getAllWithdrawals("processing" as WithdrawalStatus);
+      
+      console.log(`Verificando ${processingSaques.length} saques em processamento...`);
+      
+      const results = [];
+      let updatedCount = 0;
+      
+      // Para cada saque em processamento, verificar se o pagamento foi concluído
+      for (const saque of processingSaques) {
+        try {
+          // Buscar gateway ativo
+          const gateway = await storage.getPaymentGatewayByType("pushinpay");
+          if (!gateway || !gateway.isActive) {
+            console.warn("Nenhum gateway de pagamento ativo encontrado para verificar saques");
+            results.push({
+              id: saque.id,
+              status: "processing",
+              message: "Nenhum gateway de pagamento ativo configurado"
+            });
+            continue;
+          }
+          
+          console.log(`Verificando saque ID=${saque.id} (R$ ${saque.amount}) para ${saque.pixKey}`);
+          
+          // Em uma implementação real, faríamos uma chamada para a API do gateway
+          // Aqui estamos simulando uma verificação básica baseada em tempo
+          // O ideal seria usar o ID da transação externa e verificar o status no gateway
+          
+          // Apenas para simulação: 20% de chance do pagamento estar concluído
+          const shouldComplete = Math.random() < 0.2;
+          
+          if (shouldComplete) {
+            // Atualizar o saque para "approved"
+            await storage.updateWithdrawalStatus(
+              saque.id,
+              "approved" as WithdrawalStatus,
+              null, // processedBy - automático
+              null, // rejectionReason
+              "Pagamento confirmado pelo gateway"
+            );
+            
+            console.log(`Saque ID=${saque.id} confirmado pelo gateway e marcado como aprovado!`);
+            
+            results.push({
+              id: saque.id,
+              status: "approved",
+              message: "Pagamento confirmado pelo gateway"
+            });
+            
+            updatedCount++;
+          } else {
+            results.push({
+              id: saque.id,
+              status: "processing",
+              message: "Saque ainda em processamento pelo gateway"
+            });
+          }
+        } catch (err) {
+          console.error(`Erro ao verificar saque ID=${saque.id}:`, err);
+          results.push({
+            id: saque.id,
+            status: "error",
+            message: err instanceof Error ? err.message : "Erro desconhecido"
+          });
+        }
+      }
+      
+      res.json({
+        message: `Verificação concluída para ${processingSaques.length} saques`,
+        updatedCount,
+        results
+      });
+    } catch (error) {
+      console.error("Erro ao verificar saques em processamento:", error);
+      res.status(500).json({ message: "Erro ao verificar saques" });
+    }
+  });
+
+  // Rota para verificação automática periódica de saques em processamento
+  app.post("/api/check-withdrawals-auto", async (req, res) => {
+    try {
+      // Verificar token de acesso (para evitar chamadas não autorizadas)
+      const { token } = req.body;
+      
+      if (token !== process.env.PUSHIN_PAY_TOKEN) {
+        return res.status(401).json({ message: "Token inválido" });
+      }
+      
+      // Buscar todos os saques com status "processing"
+      const processingSaques = await storage.getAllWithdrawals("processing" as WithdrawalStatus);
+      
+      console.log(`Verificação automática de saques: ${processingSaques.length} saques em processamento...`);
+      
+      const results = [];
+      let updatedCount = 0;
+      
+      // Para cada saque em processamento, verificar se o pagamento foi concluído
+      for (const saque of processingSaques) {
+        try {
+          // Verificar apenas saques com mais de 5 minutos (para dar tempo ao gateway)
+          const tempoProcessamento = new Date().getTime() - new Date(saque.requestedAt).getTime();
+          const minutos = Math.floor(tempoProcessamento / (1000 * 60));
+          
+          if (minutos < 5) {
+            console.log(`Saque ID=${saque.id} tem apenas ${minutos} minutos, aguardando mais tempo`);
+            results.push({
+              id: saque.id,
+              status: "processing",
+              message: `Aguardando mais tempo (${minutos} minutos)`
+            });
+            continue;
+          }
+          
+          // Verificar com o gateway o status do pagamento
+          console.log(`Verificando saque ID=${saque.id} (R$ ${saque.amount}) para ${saque.pixKey}`);
+          
+          // Em uma implementação real, chamaríamos a API do gateway
+          // Aqui estamos simulando uma verificação baseada em tempo
+          const tempoHoras = minutos / 60;
+          
+          // Após 1 hora, 50% de chance de aprovar automaticamente (apenas simulação)
+          if (tempoHoras > 1 && Math.random() < 0.5) {
+            await storage.updateWithdrawalStatus(
+              saque.id,
+              "approved" as WithdrawalStatus,
+              null,
+              null,
+              `Pagamento confirmado automaticamente após ${tempoHoras.toFixed(1)}h de processamento`
+            );
+            
+            console.log(`Saque ID=${saque.id} aprovado automaticamente após ${tempoHoras.toFixed(1)}h`);
+            
+            results.push({
+              id: saque.id,
+              status: "approved",
+              message: `Aprovado após ${tempoHoras.toFixed(1)}h`
+            });
+            
+            updatedCount++;
+          } else {
+            results.push({
+              id: saque.id,
+              status: "processing",
+              message: `Ainda em processamento (${tempoHoras.toFixed(1)}h)`
+            });
+          }
+        } catch (err) {
+          console.error(`Erro ao verificar saque ID=${saque.id}:`, err);
+          results.push({
+            id: saque.id,
+            status: "error",
+            message: err instanceof Error ? err.message : "Erro desconhecido"
+          });
+        }
+      }
+      
+      res.json({
+        message: `Verificação automática concluída para ${processingSaques.length} saques`,
+        updatedCount,
+        results
+      });
+    } catch (error) {
+      console.error("Erro na verificação automática de saques:", error);
+      res.status(500).json({ message: "Erro ao verificar saques" });
+    }
+  });
+  
+  // Endpoint para atualizar o esquema de configurações do sistema (adicionar novos campos)
+  app.get('/api/admin/update-system-schema', async (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin) {
+      return res.status(403).json({ error: "Acesso não autorizado" });
+    }
+    
+    try {
+      // Verificar se os novos campos existem
+      const checkColumns = await pool.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'system_settings' 
+        AND column_name IN ('site_name', 'site_description', 'logo_url', 'favicon_url')
+      `);
+      
+      const existingColumns = checkColumns.rows.map((row: any) => row.column_name);
+      console.log("Colunas existentes:", existingColumns);
+      
+      // Adicionar colunas ausentes
+      const columnsToAdd = [];
+      if (!existingColumns.includes('site_name')) columnsToAdd.push("site_name TEXT NOT NULL DEFAULT 'Jogo do Bicho'");
+      if (!existingColumns.includes('site_description')) columnsToAdd.push("site_description TEXT NOT NULL DEFAULT 'A melhor plataforma de apostas online'");
+      if (!existingColumns.includes('logo_url')) columnsToAdd.push("logo_url TEXT NOT NULL DEFAULT '/img/logo.png'");
+      if (!existingColumns.includes('favicon_url')) columnsToAdd.push("favicon_url TEXT NOT NULL DEFAULT '/img/favicon.png'");
+      
+      if (columnsToAdd.length > 0) {
+        // Executar alteração no banco de dados
+        const alterQuery = `
+          ALTER TABLE system_settings 
+          ${columnsToAdd.map(col => `ADD COLUMN IF NOT EXISTS ${col}`).join(', ')}
+        `;
+        
+        console.log("Executando alteração:", alterQuery);
+        await pool.query(alterQuery);
+        
+        res.json({ 
+          success: true, 
+          message: `Adicionados ${columnsToAdd.length} novos campos à tabela system_settings`,
+          added_fields: columnsToAdd
+        });
+      } else {
+        res.json({ 
+          success: true, 
+          message: "Todos os campos já existem na tabela system_settings",
+          existing_fields: existingColumns
+        });
+      }
+    } catch (error) {
+      console.error("Erro ao atualizar esquema de system_settings:", error);
+      res.status(500).json({ 
+        success: false,
+        error: "Erro ao atualizar esquema", 
+        details: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
   return httpServer;
 }

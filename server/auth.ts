@@ -135,12 +135,8 @@ export function setupAuth(app: Express) {
                 status: "active",
                 expiresAt: expirationDate
               });
-
-              // IMPORTANTE: Atualizar o saldo de bônus do usuário
-              await storage.updateUserBonusBalance(user.id, bonusAmount);
               
               console.log(`[Bônus] Bônus de cadastro aplicado com sucesso: R$ ${bonusAmount.toFixed(2)}`);
-              console.log(`[Bônus] Saldo de bônus atualizado para usuário ${user.id}`);
               console.log(`[Bônus] Detalhes: Rollover R$ ${rolloverAmount.toFixed(2)}, Expira em ${expirationDays} dias`);
             } else {
               console.log(`[Bônus] Bônus de cadastro está ativado mas o valor é zero ou inválido: ${bonusAmount}`);
