@@ -6,6 +6,8 @@ import { pool, db } from "./db";
 import { z } from "zod";
 import fs from "fs-extra";
 import path from "path";
+import { pushinPayService } from "./services/pushinpay";
+import { handlePushinPayWebhook } from "./webhooks/pushinpay";
 import { 
   insertBetSchema, 
   insertDrawSchema, 
@@ -3968,35 +3970,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Create new payment transaction - Pushin Pay PIX integration
+  // Create new payment transaction - Pushin Pay PIX integration (NOVA IMPLEMENTAÇÃO)
   app.post("/api/payment/pushinpay", requireAuth, async (req, res) => {
     try {
-      // Extrair o userId do usuário autenticado - NUNCA do corpo da requisição
+      // Extrair o userId do usuário autenticado
       const userId = req.user!.id;
+      const username = req.user!.username;
       
       // Log para auditoria de segurança
-      console.log(`SEGURANÇA: Criando transação de pagamento para usuário ID: ${userId}`);
+      console.log(`[PushinPay] Criando transação para usuário ${username} (${userId})`);
       
-      // Extrair apenas o valor do corpo da requisição, ignorando qualquer userId que possa ter sido enviado
+      // Extrair apenas o valor do corpo da requisição
       let { amount } = req.body;
       
-      // Verificar se alguém tentou enviar um userId no corpo da requisição (potencial ataque)
-      if (req.body.userId !== undefined && req.body.userId !== userId) {
-        console.error(`ALERTA DE SEGURANÇA: Tentativa de criar transação para outro usuário. 
-          Usuário real: ${userId}, 
-          Usuário tentado: ${req.body.userId}`);
-        
-        // Continuar processando, mas ignorar o userId enviado no corpo
-      }
+      // Validar e converter o valor
+      console.log('[PushinPay] Valor original recebido:', amount);
       
-      // Verificar e limpar o valor recebido
-      console.log('Valor original recebido:', amount);
-      
-      // Se for uma string, converter para número
       if (typeof amount === 'string') {
-        // Verificar se a string está no formato brasileiro (com vírgula)
         if (amount.includes(',')) {
-          // Converter de PT-BR para EN-US
           amount = parseFloat(amount.replace('.', '').replace(',', '.'));
         } else {
           amount = parseFloat(amount);
@@ -4164,13 +4155,125 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Webhook/callback for Pushin Pay (would be called by the payment provider)
-  app.post("/api/webhooks/pushinpay", async (req, res) => {
+  // Webhook/callback for Pushin Pay - NOVA IMPLEMENTAÇÃO BASEADA NA DOCUMENTAÇÃO OFICIAL
+  app.post("/api/webhooks/pushinpay", handlePushinPayWebhook);
+
+  // Endpoint para verificação manual de PIX via API da PushinPay
+  app.post("/api/payment/pushinpay/check/:transactionId", requireAuth, async (req, res) => {
     try {
-      // Log para auditoria de segurança
-      console.log("Webhook da Pushin Pay recebido:", JSON.stringify(req.body, null, 2));
+      const transactionId = parseInt(req.params.transactionId);
+      const userId = req.user!.id;
       
-      const { transactionId, status, externalId, amount, signature } = req.body;
+      if (isNaN(transactionId)) {
+        return res.status(400).json({ message: "ID de transação inválido" });
+      }
+      
+      // Buscar transação
+      const transaction = await storage.getPaymentTransaction(transactionId);
+      if (!transaction) {
+        return res.status(404).json({ message: "Transação não encontrada" });
+      }
+      
+      // Verificar se a transação pertence ao usuário
+      if (transaction.userId !== userId) {
+        return res.status(403).json({ message: "Acesso negado" });
+      }
+      
+      // Se já está completa, retornar status
+      if (transaction.status === 'completed') {
+        return res.json({
+          status: 'completed',
+          message: 'Pagamento já confirmado',
+          transaction
+        });
+      }
+      
+      // Verificar se tem external ID para consultar na API
+      if (!transaction.externalId) {
+        return res.json({
+          status: transaction.status,
+          message: 'Aguardando processamento',
+          transaction
+        });
+      }
+      
+      try {
+        // Consultar status na API da PushinPay
+        const pixStatus = await pushinPayService.getPixStatus(transaction.externalId);
+        console.log(`[PushinPay Check] Status do PIX ${transaction.externalId}:`, pixStatus);
+        
+        // Se foi pago, atualizar transação
+        if (pixStatus.status === 'paid') {
+          console.log(`[PushinPay Check] PIX confirmado! Atualizando transação ${transactionId}`);
+          
+          // Atualizar status
+          await storage.updateTransactionStatus(
+            transactionId,
+            "completed",
+            transaction.externalId,
+            undefined,
+            pixStatus
+          );
+          
+          // Atualizar saldo do usuário
+          await storage.updateUserBalance(userId, transaction.amount);
+          
+          // Criar registro financeiro
+          await storage.createTransaction({
+            userId,
+            type: "deposit",
+            amount: transaction.amount,
+            description: `Depósito via PushinPay - PIX ${transaction.externalId}`,
+            relatedId: transactionId
+          });
+          
+          return res.json({
+            status: 'completed',
+            message: 'Pagamento confirmado!',
+            transaction: await storage.getPaymentTransaction(transactionId)
+          });
+        }
+        
+        // Se expirou ou foi cancelado
+        if (pixStatus.status === 'expired' || pixStatus.status === 'cancelled') {
+          await storage.updateTransactionStatus(
+            transactionId,
+            "failed",
+            transaction.externalId,
+            undefined,
+            pixStatus
+          );
+          
+          return res.json({
+            status: 'failed',
+            message: `PIX ${pixStatus.status === 'expired' ? 'expirado' : 'cancelado'}`,
+            transaction: await storage.getPaymentTransaction(transactionId)
+          });
+        }
+        
+        // Ainda pendente
+        return res.json({
+          status: 'pending',
+          message: 'Aguardando pagamento',
+          pixStatus: pixStatus.status,
+          transaction
+        });
+        
+      } catch (apiError) {
+        console.error("[PushinPay Check] Erro na consulta da API:", apiError);
+        return res.status(500).json({
+          message: "Erro ao verificar status do pagamento",
+          error: (apiError as Error).message
+        });
+      }
+      
+    } catch (error) {
+      console.error("[PushinPay Check] Erro:", error);
+      res.status(500).json({ message: "Erro interno do servidor" });
+    }
+  });
+
+  // Nova implementação PushinPay completa implementada! ✅
       
       // Validações básicas dos dados
       if (!transactionId || !status) {
