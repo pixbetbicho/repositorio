@@ -4274,55 +4274,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Nova implementação PushinPay completa implementada! ✅
-      
-      // Validações básicas dos dados
-      if (!transactionId || !status) {
-        console.error("Webhook com dados incompletos:", req.body);
-        return res.status(400).json({ message: "Missing required fields" });
-      }
-      
-      // Validar que o ID da transação é um número (segurança)
-      const parsedTransactionId = parseInt(transactionId);
-      if (isNaN(parsedTransactionId)) {
-        console.error(`ALERTA DE SEGURANÇA: ID de transação inválido recebido no webhook: ${transactionId}`);
-        return res.status(400).json({ message: "Invalid transaction ID format" });
-      }
-      
-      // Em uma implementação real, verificaríamos a assinatura da requisição
-      // para garantir que ela veio realmente do gateway de pagamento
-      if (process.env.NODE_ENV === 'production') {
-        // Obter o gateway para verificar a chave secreta
-        const transaction = await storage.getPaymentTransaction(transactionId);
-        if (!transaction) {
-          return res.status(404).json({ message: "Transaction not found" });
-        }
-        
-        const gateway = await storage.getPaymentGateway(transaction.gatewayId);
-        if (!gateway) {
-          return res.status(404).json({ message: "Payment gateway not found" });
-        }
-        
-        // Verificar assinatura
-        // Esta é uma simulação - em um cenário real, verificaríamos 
-        // a assinatura usando a chave secreta do gateway e um algoritmo específico
-        if (!gateway.secretKey || !signature) {
-          console.warn("Missing webhook signature or secret key for validation");
-          // Em produção, poderíamos rejeitar a solicitação se a assinatura for inválida
-          // return res.status(401).json({ message: "Invalid webhook signature" });
-        }
-      }
-      
-      // Status válidos que podemos receber do gateway
-      const validStatuses = ['pending', 'processing', 'completed', 'failed', 'cancelled'];
-      if (!validStatuses.includes(status)) {
-        return res.status(400).json({ message: "Invalid transaction status" });
-      }
-      
-      // Consultar a transação atual
-      const currentTransaction = await storage.getPaymentTransaction(transactionId);
-      if (!currentTransaction) {
-        return res.status(404).json({ message: "Transaction not found" });
-      }
+
+  // ========== Rotas para gerenciamento de saques ==========
       
       // Verificações adicionais para transações já completadas
       if (currentTransaction.status === 'completed' && status === 'completed') {
@@ -4561,16 +4514,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
       
-      // Resposta de sucesso
-      res.json({ 
-        message: "Webhook processed successfully",
-        transactionId,
-        status: updatedTransaction.status
-      });
+      console.log("Webhook processado com sucesso");
     } catch (err) {
-      const error = err as Error;
-      console.error("Error processing payment webhook:", error);
-      res.status(500).json({ message: "Error processing payment webhook" });
+      console.error("Error processing payment webhook:", err);
     }
   });
 
