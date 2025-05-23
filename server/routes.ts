@@ -4118,6 +4118,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           qrCodeUrl || undefined,
           responseData
         );
+
+        // 🚀 INICIAR MONITORAMENTO AUTOMÁTICO DO PAGAMENTO
+        console.log(`[Auto Monitor] 🎯 Iniciando monitoramento automático para transação ${transaction.id}`);
+        startPaymentMonitoring(transaction.id);
         
         // Retornar os dados para o cliente
         res.json({
@@ -4129,7 +4133,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           qrCodeBase64: qrCodeBase64,
           amount: amount.toFixed(2),
           status: "pending",
-          message: "PIX payment process initiated via Pushin Pay",
+          message: "PIX payment process initiated via Pushin Pay - Monitoramento automático ativado!",
           paymentDetails: responseData
         });
         
@@ -4274,6 +4278,194 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Nova implementação PushinPay completa implementada! ✅
+  
+  // Sistema de verificação automática de pagamentos
+  const pendingPayments = new Map<number, NodeJS.Timeout>();
+
+  // Função para iniciar monitoramento automático
+  function startPaymentMonitoring(transactionId: number) {
+    console.log(`[Auto Monitor] Iniciando monitoramento para transação ${transactionId}`);
+    
+    const checkInterval = setInterval(async () => {
+      try {
+        const transaction = await storage.getPaymentTransaction(transactionId);
+        if (!transaction || transaction.status === 'completed') {
+          console.log(`[Auto Monitor] Transação ${transactionId} já processada ou não encontrada`);
+          clearInterval(checkInterval);
+          pendingPayments.delete(transactionId);
+          return;
+        }
+
+        // Verificar status na PushinPay
+        const externalId = `DEPOSIT-${transactionId}`;
+        const paymentStatus = await pushinPayService.getPixStatus(externalId);
+        
+        if (paymentStatus && paymentStatus.status === 'paid') {
+          console.log(`[Auto Monitor] 🎉 PAGAMENTO CONFIRMADO! Transação ${transactionId}`);
+          
+          // Parar monitoramento
+          clearInterval(checkInterval);
+          pendingPayments.delete(transactionId);
+          
+          // Processar pagamento
+          await storage.updateTransactionStatus(
+            transactionId,
+            "completed",
+            paymentStatus.id,
+            undefined,
+            { paid_at: paymentStatus.paid_at }
+          );
+
+          // Creditar saldo
+          await storage.updateUserBalance(transaction.userId, transaction.amount);
+          
+          // Aplicar bônus se for primeiro depósito
+          await processFirstDepositBonus(transaction.userId, transaction.amount, transactionId);
+          
+          console.log(`[Auto Monitor] ✅ Saldo creditado automaticamente: R$ ${transaction.amount.toFixed(2)} para usuário ${transaction.userId}`);
+        }
+        
+      } catch (error) {
+        console.error(`[Auto Monitor] Erro ao verificar transação ${transactionId}:`, error);
+      }
+    }, 5000); // Verifica a cada 5 segundos
+
+    // Armazenar referência do intervalo
+    pendingPayments.set(transactionId, checkInterval);
+    
+    // Parar monitoramento após 30 minutos (tempo limite)
+    setTimeout(() => {
+      if (pendingPayments.has(transactionId)) {
+        console.log(`[Auto Monitor] Timeout para transação ${transactionId} - parando monitoramento`);
+        clearInterval(checkInterval);
+        pendingPayments.delete(transactionId);
+      }
+    }, 30 * 60 * 1000); // 30 minutos
+  }
+
+  // Endpoint para verificação manual de pagamentos (produção)
+  app.post("/api/pushinpay/check-payment", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Não autorizado" });
+    }
+
+    try {
+      const { transactionId } = req.body;
+      
+      if (!transactionId) {
+        return res.status(400).json({ message: "ID da transação é obrigatório" });
+      }
+
+      console.log(`[Manual Check] Verificando pagamento para transação ${transactionId}`);
+      
+      // Buscar transação no banco
+      const transaction = await storage.getPaymentTransaction(transactionId);
+      if (!transaction) {
+        return res.status(404).json({ message: "Transação não encontrada" });
+      }
+
+      // Se já foi processada, retornar status atual
+      if (transaction.status === 'completed') {
+        return res.json({ 
+          message: "Pagamento já processado",
+          status: transaction.status,
+          amount: transaction.amount
+        });
+      }
+
+      // Verificar status na PushinPay
+      const externalId = `DEPOSIT-${transactionId}`;
+      const paymentStatus = await pushinPayService.getPixStatus(externalId);
+      
+      if (paymentStatus && paymentStatus.status === 'paid') {
+        console.log(`[Manual Check] Pagamento confirmado para transação ${transactionId}`);
+        
+        // Atualizar status da transação
+        const updatedTransaction = await storage.updateTransactionStatus(
+          transactionId,
+          "completed",
+          paymentStatus.id,
+          undefined,
+          { paid_at: paymentStatus.paid_at }
+        );
+
+        if (updatedTransaction) {
+          // Adicionar saldo ao usuário
+          await storage.updateUserBalance(transaction.userId, transaction.amount);
+          
+          // Verificar e aplicar bônus de primeiro depósito
+          await processFirstDepositBonus(transaction.userId, transaction.amount, transactionId);
+          
+          console.log(`[Manual Check] Saldo creditado: R$ ${transaction.amount.toFixed(2)} para usuário ${transaction.userId}`);
+        }
+
+        return res.json({
+          message: "Pagamento confirmado e processado",
+          status: "completed",
+          amount: transaction.amount
+        });
+      }
+
+      res.json({
+        message: "Pagamento ainda pendente",
+        status: paymentStatus?.status || "pending"
+      });
+
+    } catch (error) {
+      console.error("[Manual Check] Erro:", error);
+      res.status(500).json({ message: "Erro interno do servidor" });
+    }
+  });
+
+  // Função para processar bônus de primeiro depósito
+  async function processFirstDepositBonus(userId: number, depositAmount: number, transactionId: number) {
+    try {
+      const systemSettings = await storage.getSystemSettings();
+      
+      if (!systemSettings?.firstDepositBonusEnabled) {
+        console.log(`[Bônus] Bônus de primeiro depósito desativado`);
+        return;
+      }
+
+      // Verificar se é o primeiro depósito
+      const hasBonus = await storage.hasUserReceivedFirstDepositBonus(userId);
+      if (hasBonus) {
+        console.log(`[Bônus] Usuário ${userId} já recebeu bônus de primeiro depósito`);
+        return;
+      }
+
+      // Calcular valor do bônus
+      let bonusAmount = 0;
+      if (systemSettings.firstDepositBonusPercentage > 0) {
+        bonusAmount = (depositAmount * systemSettings.firstDepositBonusPercentage) / 100;
+        if (systemSettings.firstDepositBonusMaxAmount > 0) {
+          bonusAmount = Math.min(bonusAmount, systemSettings.firstDepositBonusMaxAmount);
+        }
+      } else if (systemSettings.firstDepositBonusAmount > 0) {
+        bonusAmount = systemSettings.firstDepositBonusAmount;
+      }
+
+      if (bonusAmount > 0) {
+        const rolloverAmount = bonusAmount * (systemSettings.firstDepositBonusRollover || 1);
+        
+        await storage.createUserBonus({
+          userId,
+          amount: bonusAmount,
+          type: "first_deposit",
+          rolloverAmount,
+          remainingAmount: bonusAmount,
+          status: "active",
+          relatedTransactionId: transactionId
+        });
+
+        await storage.updateUserBonusBalance(userId, bonusAmount);
+        
+        console.log(`[Bônus] Bônus de primeiro depósito aplicado: R$ ${bonusAmount.toFixed(2)} para usuário ${userId}`);
+      }
+    } catch (error) {
+      console.error("[Bônus] Erro ao processar bônus:", error);
+    }
+  }
 
   // ========== Rotas para gerenciamento de saques ==========
   
